@@ -20,22 +20,26 @@ package org.apache.doris.analysis;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.InfoSchemaDb;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 // Show variables statement.
-public class ShowVariablesStmt extends ShowStmt {
+public class ShowVariablesStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowVariablesStmt.class);
     private static final String NAME_COL = "Variable_name";
     private static final String VALUE_COL = "Value";
+    private static final String DEFAULT_VALUE_COL = "Default_Value";
+    private static final String CHANGED_COL = "Changed";
     private static final ShowResultSetMetaData META_DATA =
             ShowResultSetMetaData.builder()
                     .addColumn(new Column(NAME_COL, ScalarType.createVarchar(20)))
                     .addColumn(new Column(VALUE_COL, ScalarType.createVarchar(20)))
+                    .addColumn(new Column(DEFAULT_VALUE_COL, ScalarType.createVarchar(20)))
+                    .addColumn(new Column(CHANGED_COL, ScalarType.createVarchar(20)))
                     .build();
 
     private SetType type;
@@ -83,9 +87,11 @@ public class ShowVariablesStmt extends ShowStmt {
         ExprSubstitutionMap aliasMap = new ExprSubstitutionMap(false);
         TableName tableName = null;
         if (type == SetType.GLOBAL) {
-            tableName = new TableName(InfoSchemaDb.DATABASE_NAME, "GLOBAL_VARIABLES");
+            tableName = new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, InfoSchemaDb.DATABASE_NAME,
+                    "GLOBAL_VARIABLES");
         } else {
-            tableName = new TableName(InfoSchemaDb.DATABASE_NAME, "SESSION_VARIABLES");
+            tableName = new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, InfoSchemaDb.DATABASE_NAME,
+                    "SESSION_VARIABLES");
         }
         // name
         SelectListItem item = new SelectListItem(new SlotRef(tableName, "VARIABLE_NAME"), NAME_COL);
@@ -100,11 +106,13 @@ public class ShowVariablesStmt extends ShowStmt {
         selectStmt = new SelectStmt(selectList,
                 new FromClause(Lists.newArrayList(new TableRef(tableName, null))),
                 where, null, null, null, LimitElement.NO_LIMIT);
-        LOG.debug("select stmt is {}", selectStmt.toSql());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("select stmt is {}", selectStmt.toSql());
+        }
 
         // DB: type
         // table: thread id
-        analyzer.setSchemaInfo(type.toSql(), null, null);
+        analyzer.setSchemaInfo(null, null, null);
         return selectStmt;
     }
 

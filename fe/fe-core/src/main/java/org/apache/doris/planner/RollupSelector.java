@@ -35,7 +35,6 @@ import org.apache.doris.qe.ConnectContext;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -63,8 +62,8 @@ public final class RollupSelector {
     public long selectBestRollup(
             Collection<Long> partitionIds, List<Expr> conjuncts, boolean isPreAggregation)
             throws UserException {
-        Preconditions.checkArgument(partitionIds != null , "Paritition can't be null.");
-        
+        Preconditions.checkArgument(partitionIds != null, "Paritition can't be null.");
+
         ConnectContext connectContext = ConnectContext.get();
         if (connectContext != null && connectContext.getSessionVariable().isUseV2Rollup()) {
             // if user set `use_v2_rollup` variable to true, and there is a segment v2 rollup,
@@ -75,7 +74,8 @@ public final class RollupSelector {
                 return v2RollupIndexId;
             }
         }
-        // Get first partition to select best prefix index rollups, because MaterializedIndex ids in one rollup's partitions are all same.
+        // Get first partition to select best prefix index rollups,
+        // because MaterializedIndex ids in one rollup's partitions are all same.
         final List<Long> bestPrefixIndexRollups = selectBestPrefixIndexRollup(conjuncts, isPreAggregation);
         return selectBestRowCountRollup(bestPrefixIndexRollups, partitionIds);
     }
@@ -88,7 +88,9 @@ public final class RollupSelector {
             for (Long partitionId : partitionIds) {
                 rowCount += table.getPartition(partitionId).getIndex(indexId).getRowCount();
             }
-            LOG.debug("rowCount={} for table={}", rowCount, indexId);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("rowCount={} for table={}", rowCount, indexId);
+            }
             if (rowCount < minRowCount) {
                 minRowCount = rowCount;
                 selectedIndexId = indexId;
@@ -114,8 +116,8 @@ public final class RollupSelector {
         return selectedIndexId;
     }
 
-    private List<Long> selectBestPrefixIndexRollup(List<Expr> conjuncts, boolean isPreAggregation) throws UserException {
-
+    private List<Long> selectBestPrefixIndexRollup(List<Expr> conjuncts, boolean isPreAggregation)
+            throws UserException {
         final List<String> outputColumns = Lists.newArrayList();
         for (SlotDescriptor slot : tupleDesc.getMaterializedSlots()) {
             Column col = slot.getColumn();
@@ -123,7 +125,9 @@ public final class RollupSelector {
         }
 
         final List<MaterializedIndex> rollups = table.getVisibleIndex();
-        LOG.debug("num of rollup(base included): {}, pre aggr: {}", rollups.size(), isPreAggregation);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("num of rollup(base included): {}, pre aggr: {}", rollups.size(), isPreAggregation);
+        }
 
         // 1. find all rollup indexes which contains all tuple columns
         final List<MaterializedIndex> rollupsContainsOutput = Lists.newArrayList();
@@ -131,31 +135,38 @@ public final class RollupSelector {
         for (MaterializedIndex rollup : rollups) {
             final Set<String> rollupColumns = Sets.newHashSet();
             table.getSchemaByIndexId(rollup.getId(), true)
-                    .stream().forEach(column -> rollupColumns.add(column.getName()));
+                    .forEach(column -> rollupColumns.add(column.getName()));
 
             if (rollupColumns.containsAll(outputColumns)) {
                 // If preAggregation is off, so that we only can use base table
                 // or those rollup tables which key columns is the same with base table
                 // (often in different order)
                 if (isPreAggregation) {
-                    LOG.debug("preAggregation is on. add index {} which contains all output columns",
-                            rollup.getId());
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("preAggregation is on. add index {} which contains all output columns",
+                                rollup.getId());
+                    }
                     rollupsContainsOutput.add(rollup);
                 } else if (table.getKeyColumnsByIndexId(rollup.getId()).size() == baseTableColumns.size()) {
-                    LOG.debug("preAggregation is off, but index {} have same key columns with base index.",
-                            rollup.getId());
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("preAggregation is off, but index {} have same key columns with base index.",
+                                rollup.getId());
+                    }
                     rollupsContainsOutput.add(rollup);
                 }
             } else {
-                LOG.debug("exclude index {} because it does not contain all output columns", rollup.getId());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("exclude index {} because it does not contain all output columns", rollup.getId());
+                }
             }
         }
 
-        Preconditions.checkArgument(rollupsContainsOutput.size() > 0,
-                "Can't find candicate rollup contains all output columns.");
+        if (rollupsContainsOutput.size() == 0) {
+            throw new UserException("Can't find candicate rollup contains all output columns.");
+        }
 
-
-        // 2. find all rollups which match the prefix most based on predicates column from containTupleIndices.
+        // 2. find all rollups which match the prefix most based on predicates column
+        // from containTupleIndices.
         final Set<String> equivalenceColumns = Sets.newHashSet();
         final Set<String> unequivalenceColumns = Sets.newHashSet();
         collectColumns(conjuncts, equivalenceColumns, unequivalenceColumns);
@@ -164,7 +175,7 @@ public final class RollupSelector {
                          equivalenceColumns, unequivalenceColumns);
 
         if (rollupsMatchingBestPrefixIndex.isEmpty()) {
-            rollupsContainsOutput.stream().forEach(n -> rollupsMatchingBestPrefixIndex.add(n.getId()));
+            rollupsContainsOutput.forEach(n -> rollupsMatchingBestPrefixIndex.add(n.getId()));
         }
 
         // 3. sorted the final candidate indexes by index id
@@ -192,7 +203,7 @@ public final class RollupSelector {
             for (Column col : table.getSchemaByIndexId(index.getId())) {
                 if (equivalenceColumns.contains(col.getName())) {
                     prefixMatchCount++;
-                } else if (unequivalenceColumns.contains(col.getName())) { 
+                } else if (unequivalenceColumns.contains(col.getName())) {
                     // Unequivalence predicate's columns can match only first column in rollup.
                     prefixMatchCount++;
                     break;
@@ -202,10 +213,16 @@ public final class RollupSelector {
             }
 
             if (prefixMatchCount == maxPrefixMatchCount) {
-                LOG.debug("s3: find a equal prefix match index {}. match count: {}", index.getId(), prefixMatchCount);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("s3: find a equal prefix match index {}. match count: {}",
+                            index.getId(), prefixMatchCount);
+                }
                 rollupsMatchingBestPrefixIndex.add(index.getId());
             } else if (prefixMatchCount > maxPrefixMatchCount) {
-                LOG.debug("s3: find a better prefix match index {}. match count: {}", index.getId(), prefixMatchCount);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("s3: find a better prefix match index {}. match count: {}",
+                            index.getId(), prefixMatchCount);
+                }
                 maxPrefixMatchCount = prefixMatchCount;
                 rollupsMatchingBestPrefixIndex.clear();
                 rollupsMatchingBestPrefixIndex.add(index.getId());
@@ -269,12 +286,12 @@ public final class RollupSelector {
             return false;
         }
         if (expr instanceof InPredicate) {
-            return isInPredicateUsedForPrefixIndex((InPredicate)expr);
+            return isInPredicateUsedForPrefixIndex((InPredicate) expr);
         } else if (expr instanceof BinaryPredicate) {
             if (isJoinConjunct) {
-                return isEqualJoinConjunctUsedForPrefixIndex((BinaryPredicate)expr);
+                return isEqualJoinConjunctUsedForPrefixIndex((BinaryPredicate) expr);
             } else {
-                return isBinaryPredicateUsedForPrefixIndex((BinaryPredicate)expr);
+                return isBinaryPredicateUsedForPrefixIndex((BinaryPredicate) expr);
             }
         }
         return true;

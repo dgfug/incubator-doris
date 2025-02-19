@@ -17,28 +17,31 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.alter.QuotaType;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.InternalDatabaseUtil;
 import org.apache.doris.common.util.ParseUtil;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
+import com.google.gson.annotations.SerializedName;
 
-public class AlterDatabaseQuotaStmt extends DdlStmt {
+public class AlterDatabaseQuotaStmt extends DdlStmt implements NotFallbackInParser {
+    @SerializedName("db")
     private String dbName;
-    private QuotaType quotaType;
-    private String quotaValue;
-    private long quota;
 
-    public enum QuotaType {
-        NONE,
-        DATA,
-        REPLICA
-    }
+    @SerializedName("qt")
+    private QuotaType quotaType;
+
+    @SerializedName("qv")
+    private String quotaValue;
+
+    @SerializedName("q")
+    private long quota;
 
     public AlterDatabaseQuotaStmt(String dbName, QuotaType quotaType, String quotaValue) {
         this.dbName = dbName;
@@ -61,25 +64,33 @@ public class AlterDatabaseQuotaStmt extends DdlStmt {
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
         super.analyze(analyzer);
-
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_DB_ACCESS_DENIED, analyzer.getQualifiedUser(), dbName);
+        InternalDatabaseUtil.checkDatabase(dbName, ConnectContext.get());
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_DBACCESS_DENIED_ERROR,
+                    analyzer.getQualifiedUser(), dbName);
         }
 
         if (Strings.isNullOrEmpty(dbName)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
         }
-        dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         if (quotaType == QuotaType.DATA) {
-            quota = ParseUtil.analyzeDataVolumn(quotaValue);
+            quota = ParseUtil.analyzeDataVolume(quotaValue);
         } else if (quotaType == QuotaType.REPLICA) {
             quota = ParseUtil.analyzeReplicaNumber(quotaValue);
+        } else if (quotaType == QuotaType.TRANSACTION) {
+            quota = ParseUtil.analyzeTransactionNumber(quotaValue);
         }
-
     }
 
     @Override
     public String toSql() {
-        return "ALTER DATABASE " + dbName + " SET " + (quotaType == QuotaType.DATA ? "DATA" : "REPLICA") +" QUOTA " + quotaValue;
+        return "ALTER DATABASE " + dbName + " SET "
+                + quotaType.name()
+                + " QUOTA " + quotaValue;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.ALTER;
     }
 }

@@ -51,12 +51,14 @@ enum { RLE_PAGE_HEADER_SIZE = 4 };
 //
 // TODO(hkp): optimize rle algorithm
 template <FieldType Type>
-class RlePageBuilder : public PageBuilder {
+class RlePageBuilder : public PageBuilderHelper<RlePageBuilder<Type> > {
 public:
-    RlePageBuilder(const PageBuilderOptions& options)
-            : _options(options), _count(0), _finished(false), _bit_width(0), _rle_encoder(nullptr) {
+    using Self = RlePageBuilder<Type>;
+    friend class PageBuilderHelper<Self>;
+
+    Status init() override {
         switch (Type) {
-        case OLAP_FIELD_TYPE_BOOL: {
+        case FieldType::OLAP_FIELD_TYPE_BOOL: {
             _bit_width = 1;
             break;
         }
@@ -66,7 +68,7 @@ public:
         }
         }
         _rle_encoder = new RleEncoder<CppType>(&_buf, _bit_width);
-        reset();
+        return reset();
     }
 
     ~RlePageBuilder() { delete _rle_encoder; }
@@ -92,20 +94,25 @@ public:
         return Status::OK();
     }
 
-    OwnedSlice finish() override {
+    Status finish(OwnedSlice* slice) override {
         DCHECK(!_finished);
         _finished = true;
         // here should Flush first and then encode the count header
         // or it will lead to a bug if the header is less than 8 byte and the data is small
         _rle_encoder->Flush();
         encode_fixed32_le(&_buf[0], _count);
-        return _buf.build();
+        *slice = _buf.build();
+        return Status::OK();
     }
 
-    void reset() override {
-        _count = 0;
-        _rle_encoder->Clear();
-        _rle_encoder->Reserve(RLE_PAGE_HEADER_SIZE, 0);
+    Status reset() override {
+        RETURN_IF_CATCH_EXCEPTION({
+            _count = 0;
+            _finished = false;
+            _rle_encoder->Clear();
+            _rle_encoder->Reserve(RLE_PAGE_HEADER_SIZE, 0);
+        });
+        return Status::OK();
     }
 
     size_t count() const override { return _count; }
@@ -115,7 +122,7 @@ public:
     Status get_first_value(void* value) const override {
         DCHECK(_finished);
         if (_count == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         memcpy(value, &_first_value, SIZE_OF_TYPE);
         return Status::OK();
@@ -124,13 +131,20 @@ public:
     Status get_last_value(void* value) const override {
         DCHECK(_finished);
         if (_count == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         memcpy(value, &_last_value, SIZE_OF_TYPE);
         return Status::OK();
     }
 
 private:
+    RlePageBuilder(const PageBuilderOptions& options)
+            : _options(options),
+              _count(0),
+              _finished(false),
+              _bit_width(0),
+              _rle_encoder(nullptr) {}
+
     typedef typename TypeTraits<Type>::CppType CppType;
     enum { SIZE_OF_TYPE = TypeTraits<Type>::size };
 
@@ -138,7 +152,7 @@ private:
     size_t _count;
     bool _finished;
     int _bit_width;
-    RleEncoder<CppType>* _rle_encoder;
+    RleEncoder<CppType>* _rle_encoder = nullptr;
     faststring _buf;
     CppType _first_value;
     CppType _last_value;
@@ -166,7 +180,7 @@ public:
         _parsed = true;
 
         switch (Type) {
-        case OLAP_FIELD_TYPE_BOOL: {
+        case FieldType::OLAP_FIELD_TYPE_BOOL: {
             _bit_width = 1;
             break;
         }
@@ -179,7 +193,7 @@ public:
         _rle_decoder = RleDecoder<CppType>((uint8_t*)_data.data + RLE_PAGE_HEADER_SIZE,
                                            _data.size - RLE_PAGE_HEADER_SIZE, _bit_width);
 
-        seek_to_position_in_page(0);
+        RETURN_IF_ERROR(seek_to_position_in_page(0));
         return Status::OK();
     }
 
@@ -207,7 +221,7 @@ public:
         return Status::OK();
     }
 
-    Status next_batch(size_t* n, ColumnBlockView* dst) override {
+    Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
         DCHECK(_parsed);
         if (PREDICT_FALSE(*n == 0 || _cur_index >= _num_elements)) {
             *n = 0;
@@ -216,17 +230,49 @@ public:
 
         size_t to_fetch = std::min(*n, static_cast<size_t>(_num_elements - _cur_index));
         size_t remaining = to_fetch;
-        uint8_t* data_ptr = dst->data();
         bool result = false;
+        CppType value;
         while (remaining > 0) {
-            result = _rle_decoder.Get(reinterpret_cast<CppType*>(data_ptr));
+            result = _rle_decoder.Get(&value);
             DCHECK(result);
+            dst->insert_data((char*)(&value), SIZE_OF_TYPE);
             remaining--;
-            data_ptr += SIZE_OF_TYPE;
         }
 
         _cur_index += to_fetch;
         *n = to_fetch;
+        return Status::OK();
+    }
+
+    Status read_by_rowids(const rowid_t* rowids, ordinal_t page_first_ordinal, size_t* n,
+                          vectorized::MutableColumnPtr& dst) override {
+        DCHECK(_parsed);
+        if (PREDICT_FALSE(*n == 0 || _cur_index >= _num_elements)) {
+            *n = 0;
+            return Status::OK();
+        }
+
+        auto total = *n;
+        bool result = false;
+        size_t read_count = 0;
+        CppType value;
+        for (size_t i = 0; i < total; ++i) {
+            ordinal_t ord = rowids[i] - page_first_ordinal;
+            if (UNLIKELY(ord >= _num_elements)) {
+                *n = read_count;
+                return Status::OK();
+            }
+
+            _rle_decoder.Skip(ord - _cur_index);
+            _cur_index = ord;
+
+            result = _rle_decoder.Get(&value);
+            _cur_index++;
+            DCHECK(result);
+            dst->insert_data((char*)(&value), SIZE_OF_TYPE);
+            read_count++;
+        }
+        *n = read_count;
         return Status::OK();
     }
 

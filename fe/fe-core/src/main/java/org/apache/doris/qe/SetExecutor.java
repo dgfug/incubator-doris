@@ -17,11 +17,12 @@
 
 package org.apache.doris.qe;
 
+import org.apache.doris.analysis.SetLdapPassVar;
 import org.apache.doris.analysis.SetNamesVar;
 import org.apache.doris.analysis.SetPassVar;
-import org.apache.doris.analysis.SetLdapPassVar;
 import org.apache.doris.analysis.SetStmt;
 import org.apache.doris.analysis.SetTransaction;
+import org.apache.doris.analysis.SetUserDefinedVar;
 import org.apache.doris.analysis.SetVar;
 import org.apache.doris.common.DdlException;
 
@@ -44,16 +45,18 @@ public class SetExecutor {
         if (var instanceof SetPassVar) {
             // Set password
             SetPassVar setPassVar = (SetPassVar) var;
-            ctx.getCatalog().getAuth().setPassword(setPassVar);
-        } else if(var instanceof SetLdapPassVar){
+            ctx.getEnv().getAuth().setPassword(setPassVar);
+        } else if (var instanceof SetLdapPassVar) {
             SetLdapPassVar setLdapPassVar = (SetLdapPassVar) var;
-            ctx.getCatalog().getAuth().setLdapPassword(setLdapPassVar);
+            ctx.getEnv().getAuth().setLdapPassword(setLdapPassVar);
         } else if (var instanceof SetNamesVar) {
             // do nothing
             return;
         } else if (var instanceof SetTransaction) {
             // do nothing
             return;
+        } else if (var instanceof SetUserDefinedVar) {
+            ConnectContext.get().setUserVar(var);
         } else {
             VariableMgr.setVar(ctx.getSessionVariable(), var);
         }

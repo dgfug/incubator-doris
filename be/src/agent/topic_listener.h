@@ -15,23 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_AGENT_TOPIC_LISTENER_H
-#define DORIS_BE_SRC_AGENT_TOPIC_LISTENER_H
+#pragma once
 
-#include "gen_cpp/AgentService_types.h"
+#include <gen_cpp/BackendService_types.h>
 
 namespace doris {
 
 class TopicListener {
 public:
     virtual ~TopicListener() {}
-    // Deal with a single update
-    //
-    // Input parameters:
-    //   protocol version: the version for the protocol, listeners should deal with the msg according to the protocol
-    //   topic_update: single update
-    virtual void handle_update(const TAgentServiceVersion::type& protocol_version,
-                               const TTopicUpdate& topic_update) = 0;
+
+    virtual void handle_topic_info(const std::vector<TopicInfo>& topic_info_list) = 0;
 };
 } // namespace doris
-#endif

@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ConfigBase;
 import org.apache.doris.common.ErrorCode;
@@ -25,45 +25,49 @@ import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.OriginStatement;
+import org.apache.doris.system.NodeType;
 
 import com.google.common.collect.Maps;
 
 import java.util.Map;
 
 // admin set frontend config ("key" = "value");
-public class AdminSetConfigStmt extends DdlStmt {
-    
-    public enum ConfigType {
-        FRONTEND,
-        BACKEND
-    }
+public class AdminSetConfigStmt extends DdlStmt implements NotFallbackInParser {
 
-    private ConfigType type;
+    private boolean applyToAll;
+    private NodeType type;
     private Map<String, String> configs;
 
     private RedirectStatus redirectStatus = RedirectStatus.NO_FORWARD;
 
-    public AdminSetConfigStmt(ConfigType type, Map<String, String> configs) {
+    public AdminSetConfigStmt(NodeType type, Map<String, String> configs, boolean applyToAll) {
         this.type = type;
         this.configs = configs;
         if (this.configs == null) {
             this.configs = Maps.newHashMap();
         }
+        this.applyToAll = applyToAll;
 
         // we have to analyze configs here to determine whether to forward it to master
         for (String key : this.configs.keySet()) {
             if (ConfigBase.checkIsMasterOnly(key)) {
                 redirectStatus = RedirectStatus.FORWARD_NO_SYNC;
+                this.applyToAll = false;
             }
         }
     }
 
-    public ConfigType getType() {
+    public NodeType getType() {
         return type;
     }
 
     public Map<String, String> getConfigs() {
         return configs;
+    }
+
+    public boolean isApplyToAll() {
+        return applyToAll;
     }
 
     @Override
@@ -74,11 +78,11 @@ public class AdminSetConfigStmt extends DdlStmt {
             throw new AnalysisException("config parameter size is not equal to 1");
         }
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
-        if (type != ConfigType.FRONTEND) {
+        if (type != NodeType.FRONTEND) {
             throw new AnalysisException("Only support setting Frontend configs now");
         }
     }
@@ -86,5 +90,14 @@ public class AdminSetConfigStmt extends DdlStmt {
     @Override
     public RedirectStatus getRedirectStatus() {
         return redirectStatus;
+    }
+
+    public OriginStatement getLocalSetStmt() {
+        OriginStatement stmt = this.getOrigStmt();
+        Object[] keyArr = configs.keySet().toArray();
+        String sql = String.format("ADMIN SET FRONTEND CONFIG (\"%s\" = \"%s\");",
+                keyArr[0].toString(), configs.get(keyArr[0].toString()));
+
+        return new OriginStatement(sql, stmt.idx);
     }
 }

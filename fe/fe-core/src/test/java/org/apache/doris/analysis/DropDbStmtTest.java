@@ -19,53 +19,69 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
-import mockit.Mocked;
 
 public class DropDbStmtTest {
     Analyzer analyzer;
 
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
     }
 
     @Test
     public void testNormal() throws UserException, AnalysisException {
-        DropDbStmt stmt = new DropDbStmt(false, "test", true);
+        DropDbStmt stmt = new DropDbStmt(false, new DbName("test", "test"), false);
 
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:test", stmt.getDbName());
-        Assert.assertEquals("DROP DATABASE `testCluster:test`", stmt.toString());
+        Assert.assertEquals("test", stmt.getCtlName());
+        Assert.assertEquals("test", stmt.getDbName());
+        Assert.assertEquals("DROP DATABASE `test`", stmt.toString());
+    }
+
+    @Test
+    public void testForce() throws UserException, AnalysisException {
+        DropDbStmt stmt = new DropDbStmt(false, new DbName("test", "test"), true);
+
+        stmt.analyze(analyzer);
+        Assert.assertEquals("test", stmt.getCtlName());
+        Assert.assertEquals("test", stmt.getDbName());
+        Assert.assertEquals("DROP DATABASE `test` FORCE", stmt.toString());
     }
 
     @Test(expected = AnalysisException.class)
     public void testFailed() throws UserException, AnalysisException {
-        DropDbStmt stmt = new DropDbStmt(false, "", true);
+        DropDbStmt stmt = new DropDbStmt(false, new DbName("", ""), true);
 
         stmt.analyze(analyzer);
         Assert.fail("no exception");
     }
 
-    @Test(expected = AnalysisException.class)
-    public void testNoPriv() throws UserException, AnalysisException {
-        DropDbStmt stmt = new DropDbStmt(false, "", true);
-
-        stmt.analyze(AccessTestUtil.fetchBlockAnalyzer());
+    @Test
+    public void testNoPriv() {
+        DropDbStmt stmt = new DropDbStmt(false, new DbName("", ""), true);
+        try {
+            stmt.analyze(AccessTestUtil.fetchBlockAnalyzer());
+        } catch (AnalysisException e) {
+            return;
+        } catch (Exception e) {
+            e.printStackTrace();
+            Assert.fail(e.getMessage());
+        }
         Assert.fail("no exception");
     }
 }

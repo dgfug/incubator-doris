@@ -17,12 +17,11 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
-
-#include "common/config.h"
-#include "olap/utils.h"
-#include "util/doris_metrics.h"
 
 namespace doris {
 
@@ -37,13 +36,15 @@ public:
     CompactionPermitLimiter();
     virtual ~CompactionPermitLimiter() {}
 
-    bool request(int64_t permits);
+    void request(int64_t permits);
 
     void release(int64_t permits);
 
+    int64_t usage() const { return _used_permits; }
+
 private:
     // sum of "permits" held by executing compaction tasks currently
-    AtomicInt64 _used_permits;
+    std::atomic<int64_t> _used_permits;
     std::mutex _permits_mutex;
     std::condition_variable _permits_cv;
 };

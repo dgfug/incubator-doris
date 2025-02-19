@@ -15,31 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_URL_CODING_H
-#define DORIS_BE_SRC_COMMON_UTIL_URL_CODING_H
+#pragma once
 
-#include <boost/cstdint.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <iosfwd>
 #include <string>
-#include <vector>
 
 namespace doris {
 
 // Utility method to URL-encode a string (that is, replace special
 // characters with %<hex value in ascii>).
-// The optional parameter hive_compat controls whether we mimic Hive's
-// behaviour when encoding a string, which is only to encode certain
-// characters (excluding, e.g., ' ')
-void url_encode(const std::string& in, std::string* out);
-void url_encode(const std::vector<uint8_t>& in, std::string* out);
+void url_encode(const std::string_view& in, std::string* out);
 
 // Utility method to decode a string that was URL-encoded. Returns
 // true unless the string could not be correctly decoded.
-// The optional parameter hive_compat controls whether or not we treat
-// the strings as encoded by Hive, which means selectively ignoring
-// certain characters like ' '.
 bool url_decode(const std::string& in, std::string* out);
 
-void base64url_encode(const std::string& in, std::string* out);
 void base64_encode(const std::string& in, std::string* out);
 size_t base64_encode(const unsigned char* data, size_t length, unsigned char* encoded_data);
 
@@ -59,5 +51,3 @@ void escape_for_html(const std::string& in, std::stringstream* out);
 // Same as above, but returns a string.
 std::string escape_for_html_to_string(const std::string& in);
 } // namespace doris
-
-#endif

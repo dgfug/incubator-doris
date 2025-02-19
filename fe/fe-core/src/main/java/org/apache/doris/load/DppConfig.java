@@ -18,9 +18,8 @@
 package org.apache.doris.load;
 
 import org.apache.doris.analysis.LoadStmt;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.FeConstants;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
@@ -28,6 +27,7 @@ import org.apache.doris.thrift.TPriority;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -65,12 +65,16 @@ public class DppConfig implements Writable {
     // palo base path in hadoop
     //   dpp: paloPath/cluster_id/applications/dpp_version
     //   output: paloPath/cluster_id/output
+    @SerializedName(value = "paloPath")
     private String paloPath;
+    @SerializedName(value = "httpPort")
     private int httpPort;
+    @SerializedName(value = "hadoopConfigs")
     private Map<String, String> hadoopConfigs;
 
     // priority for palo internal schedule
     // for now are etl submit schedule and download file schedule
+    @SerializedName(value = "priority")
     private TPriority priority;
 
     // for persist
@@ -289,12 +293,12 @@ public class DppConfig implements Writable {
     }
 
     public String getApplicationsPath() {
-        return String.format("%s/%d/%s/%s", paloPath, Catalog.getCurrentCatalog().getClusterId(), APPLICATIONS_PATH,
+        return String.format("%s/%d/%s/%s", paloPath, Env.getCurrentEnv().getClusterId(), APPLICATIONS_PATH,
                 FeConstants.dpp_version);
     }
 
     public String getOutputPath() {
-        return String.format("%s/%d/%s", paloPath, Catalog.getCurrentCatalog().getClusterId(), OUTPUT_PATH);
+        return String.format("%s/%d/%s", paloPath, Env.getCurrentEnv().getClusterId(), OUTPUT_PATH);
     }
 
     public static String getHttpPortKey() {
@@ -374,7 +378,7 @@ public class DppConfig implements Writable {
         } else {
             out.writeBoolean(false);
         }
-        
+
         if (priority == null) {
             priority = TPriority.NORMAL;
         }
@@ -383,11 +387,7 @@ public class DppConfig implements Writable {
 
     public void readFields(DataInput in) throws IOException {
         boolean readPaloPath = false;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_12) {
-            if (in.readBoolean()) {
-                readPaloPath = true;
-            }
-        } else {
+        if (in.readBoolean()) {
             readPaloPath = true;
         }
         if (readPaloPath) {
@@ -397,11 +397,7 @@ public class DppConfig implements Writable {
         httpPort = in.readInt();
 
         boolean readHadoopConfigs = false;
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_12) {
-            if (in.readBoolean()) {
-                readHadoopConfigs = true;
-            }
-        } else {
+        if (in.readBoolean()) {
             readHadoopConfigs = true;
         }
         if (readHadoopConfigs) {
@@ -412,15 +408,54 @@ public class DppConfig implements Writable {
             }
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_15) {
-            this.priority = TPriority.valueOf(Text.readString(in));
-        } else {
-            this.priority = TPriority.NORMAL;
-        }
+        this.priority = TPriority.valueOf(Text.readString(in));
     }
 
     @Override
     public boolean equals(Object obj) {
+        if (obj == null) {
+            return false;
+        }
+
+        if (!(obj instanceof DppConfig)) {
+            return false;
+        }
+
+        DppConfig other = (DppConfig) obj;
+        if (paloPath == null) {
+            if (other.paloPath != null) {
+                return false;
+            }
+        } else {
+            if (!paloPath.equals(other.paloPath)) {
+                return false;
+            }
+        }
+
+        if (httpPort != other.httpPort) {
+            return false;
+        }
+
+        if (hadoopConfigs == null) {
+            if (other.hadoopConfigs != null) {
+                return false;
+            }
+        } else {
+            if (!hadoopConfigs.equals(other.hadoopConfigs)) {
+                return false;
+            }
+        }
+
+        if (priority == null) {
+            if (other.priority != null) {
+                return false;
+            }
+        } else {
+            if (!priority.equals(other.priority)) {
+                return false;
+            }
+        }
+
         return true;
     }
 }

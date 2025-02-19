@@ -55,13 +55,13 @@ public class CacheBeProxy extends CacheProxy {
                     .updateCache(address, request);
             InternalService.PCacheResponse response = future.get(timeoutMs, TimeUnit.MILLISECONDS);
             if (response.getStatus() == InternalService.PCacheStatus.CACHE_OK) {
-                status.setStatus(new Status(TStatusCode.OK, "CACHE_OK"));
+                status.updateStatus(TStatusCode.OK, "CACHE_OK");
             } else {
-                status.setStatus(response.getStatus().toString());
+                status.updateStatus(TStatusCode.INTERNAL_ERROR, response.getStatus().toString());
             }
         } catch (Exception e) {
             LOG.warn("update cache exception, sqlKey {}", sqlKey, e);
-            status.setRpcStatus(e.getMessage());
+            status.updateStatus(TStatusCode.THRIFT_RPC_ERROR, e.getMessage());
             SimpleScheduler.addToBlacklist(backend.getId(), e.getMessage());
         }
     }
@@ -80,17 +80,17 @@ public class CacheBeProxy extends CacheProxy {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (RpcException e) {
             LOG.warn("fetch catch rpc exception, sqlKey {}, backend {}", sqlKey, backend.getId(), e);
-            status.setRpcStatus(e.getMessage());
+            status.updateStatus(TStatusCode.THRIFT_RPC_ERROR, e.getMessage());
             SimpleScheduler.addToBlacklist(backend.getId(), e.getMessage());
         } catch (InterruptedException e) {
             LOG.warn("future get interrupted exception, sqlKey {}, backend {}", sqlKey, backend.getId(), e);
-            status.setStatus("interrupted exception");
+            status.updateStatus(TStatusCode.INTERNAL_ERROR, "interrupted exception");
         } catch (ExecutionException e) {
             LOG.warn("future get execution exception, sqlKey {}, backend {}", sqlKey, backend.getId(), e);
-            status.setStatus("execution exception");
+            status.updateStatus(TStatusCode.INTERNAL_ERROR, "execution exception");
         } catch (TimeoutException e) {
             LOG.warn("fetch result timeout, sqlKey {}, backend {}", sqlKey, backend.getId(), e);
-            status.setStatus("query timeout");
+            status.updateStatus(TStatusCode.TIMEOUT, "query timeout");
         }
         return null;
     }
@@ -109,6 +109,7 @@ public class CacheBeProxy extends CacheProxy {
                 try {
                     Thread.sleep(1000); //sleep 1 second
                 } catch (Exception e) {
+                    // CHECKSTYLE IGNORE THIS LINE
                 }
             }
             if (retry >= 3) {
@@ -119,23 +120,24 @@ public class CacheBeProxy extends CacheProxy {
         }
     }
 
-    protected boolean clearCache(InternalService.PClearCacheRequest request, Backend backend, int timeoutMs, Status status) {
+    protected boolean clearCache(InternalService.PClearCacheRequest request,
+            Backend backend, int timeoutMs, Status status) {
         TNetworkAddress address = new TNetworkAddress(backend.getHost(), backend.getBrpcPort());
         try {
             request = request.toBuilder().setClearType(InternalService.PClearType.CLEAR_ALL).build();
             LOG.info("clear all backend cache, backendId {}", backend.getId());
-            Future<InternalService.PCacheResponse> future = BackendServiceProxy.getInstance().clearCache(address, request);
+            Future<InternalService.PCacheResponse> future
+                    = BackendServiceProxy.getInstance().clearCache(address, request);
             InternalService.PCacheResponse response = future.get(timeoutMs, TimeUnit.MILLISECONDS);
             if (response.getStatus() == InternalService.PCacheStatus.CACHE_OK) {
-                status.setStatus(new Status(TStatusCode.OK, "CACHE_OK"));
+                status.updateStatus(TStatusCode.OK, "CACHE_OK");
                 return true;
             } else {
-                status.setStatus(response.getStatus().toString());
+                status.updateStatus(TStatusCode.INTERNAL_ERROR, response.getStatus().toString());
                 return false;
             }
         } catch (Exception e) {
             LOG.warn("clear cache exception, backendId {}", backend.getId(), e);
-        } finally {
         }
         return false;
     }

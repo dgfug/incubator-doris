@@ -31,7 +31,7 @@ public class ColumnRenameClause extends AlterTableClause {
     private String newColName;
 
     public ColumnRenameClause(String colName, String newColName) {
-        super(AlterOpType.SCHEMA_CHANGE);
+        super(AlterOpType.RENAME);
         this.colName = colName;
         this.newColName = newColName;
         this.needTableStable = false;
@@ -61,6 +61,16 @@ public class ColumnRenameClause extends AlterTableClause {
     @Override
     public Map<String, String> getProperties() {
         return null;
+    }
+
+    @Override
+    public boolean allowOpMTMV() {
+        return false;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return true;
     }
 
     @Override

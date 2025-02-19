@@ -18,9 +18,11 @@
 package org.apache.doris.qe;
 
 import org.apache.doris.common.UserException;
+import org.apache.doris.qe.help.HelpCategory;
+import org.apache.doris.qe.help.HelpObjectLoader;
+import org.apache.doris.qe.help.HelpTopic;
 
 import com.google.common.collect.Lists;
-
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -30,7 +32,7 @@ import java.util.Arrays;
 import java.util.List;
 
 public class HelpObjectLoaderTest {
-    
+
     @Test
     public void testTopicNormal() throws IOException, UserException {
         URL resource = getClass().getClassLoader().getResource("data/helpTopicNormal.md");

@@ -15,33 +15,33 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_HTTP_SNAPSHOT_ACTION_H
-#define DORIS_BE_SRC_HTTP_SNAPSHOT_ACTION_H
+#pragma once
 
-#include <boost/scoped_ptr.hpp>
+#include <cstdint>
+#include <string>
 
-#include "http/http_handler.h"
+#include "http/http_handler_with_auth.h"
 
 namespace doris {
 
-class ExecEnv;
+class HttpRequest;
+class StorageEngine;
 
 // make snapshot
 // be_host:be_http_port/api/snapshot?tablet_id=123&schema_hash=456
-class SnapshotAction : public HttpHandler {
+class SnapshotAction final : public HttpHandlerWithAuth {
 public:
-    explicit SnapshotAction(ExecEnv* exec_env);
+    explicit SnapshotAction(ExecEnv* exec_env, StorageEngine& engine, TPrivilegeHier::type hier,
+                            TPrivilegeType::type type);
 
-    virtual ~SnapshotAction() {}
+    ~SnapshotAction() override = default;
 
     void handle(HttpRequest* req) override;
 
 private:
-    int64_t make_snapshot(int64_t tablet_id, int schema_hash, std::string* snapshot_path);
+    int64_t _make_snapshot(int64_t tablet_id, int schema_hash, std::string* snapshot_path);
 
-    ExecEnv* _exec_env;
-
+    StorageEngine& _engine;
 }; // end class SnapshotAction
 
 } // end namespace doris
-#endif // DORIS_BE_SRC_HTTP_SNAPSHOT_ACTION_H

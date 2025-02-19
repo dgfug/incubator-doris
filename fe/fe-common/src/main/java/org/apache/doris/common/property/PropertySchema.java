@@ -17,20 +17,23 @@
 
 package org.apache.doris.common.property;
 
-import com.google.common.collect.ImmutableMap;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.thrift.TPropertyVal;
+
+import com.google.common.collect.ImmutableMap;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Optional;
 
-@SuppressWarnings({"unchecked","rawtypes"})
+@SuppressWarnings({"unchecked", "rawtypes"})
 public abstract class PropertySchema<T> {
     private final String name;
     private final boolean required;
@@ -189,8 +192,8 @@ public abstract class PropertySchema<T> {
 
         @Override
         public Boolean read(String rawVal) {
-            if (rawVal == null ||
-                    (!rawVal.equalsIgnoreCase("true") && !rawVal.equalsIgnoreCase("false"))) {
+            if (rawVal == null || (!rawVal.equalsIgnoreCase("true")
+                    && !rawVal.equalsIgnoreCase("false"))) {
                 throw new IllegalArgumentException(String.format("Invalid boolean : %s, use true or false", rawVal));
             }
 
@@ -223,14 +226,14 @@ public abstract class PropertySchema<T> {
     }
 
     public static final class DateProperty extends PropertySchema<Date> {
-        SimpleDateFormat dateFormat;
+        DateTimeFormatter dateFormat;
 
-        DateProperty(String name, SimpleDateFormat dateFormat) {
+        public DateProperty(String name, DateTimeFormatter dateFormat) {
             super(name);
             this.dateFormat = dateFormat;
         }
 
-        DateProperty(String name, SimpleDateFormat dateFormat, boolean isRequired) {
+        DateProperty(String name, DateTimeFormatter dateFormat, boolean isRequired) {
             super(name, isRequired);
             this.dateFormat = dateFormat;
         }
@@ -265,15 +268,15 @@ public abstract class PropertySchema<T> {
 
         public Date readTimeFormat(String timeStr) throws IllegalArgumentException {
             try {
-                return this.dateFormat.parse(timeStr);
-            } catch (ParseException e) {
+                return Date.from(LocalDateTime.parse(timeStr, dateFormat).atZone(ZoneId.systemDefault()).toInstant());
+            } catch (DateTimeParseException e) {
                 throw new IllegalArgumentException("Invalid time format, time param need "
-                        + "to be " + this.dateFormat.toPattern());
+                        + "to be " + this.dateFormat.toString());
             }
         }
 
         public String writeTimeFormat(Date timeDate) throws IllegalArgumentException {
-            return this.dateFormat.format(timeDate.getTime());
+            return LocalDateTime.ofInstant(timeDate.toInstant(), ZoneId.systemDefault()).format(this.dateFormat);
         }
     }
 
@@ -331,7 +334,7 @@ public abstract class PropertySchema<T> {
         }
     }
 
-    private static abstract class ComparableProperty<T extends Comparable> extends PropertySchema<T> {
+    private abstract static class ComparableProperty<T extends Comparable> extends PropertySchema<T> {
         protected ComparableProperty(String name) {
             super(name);
         }
@@ -396,4 +399,3 @@ public abstract class PropertySchema<T> {
 
     public abstract void write(T val, DataOutput out) throws IOException;
 }
-

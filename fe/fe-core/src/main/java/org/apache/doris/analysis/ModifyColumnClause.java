@@ -19,7 +19,12 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.alter.AlterOpType;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.KeysType;
+import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.DdlException;
 
 import com.google.common.base.Strings;
 
@@ -28,6 +33,7 @@ import java.util.Map;
 // modify one column
 public class ModifyColumnClause extends AlterTableClause {
     private ColumnDef columnDef;
+    private String sql;
     private ColumnPosition colPos;
     // which rollup is to be modify, if rollup is null, modify base table.
     private String rollupName;
@@ -37,7 +43,13 @@ public class ModifyColumnClause extends AlterTableClause {
     // set in analyze
     private Column column;
 
-    public Column getColumn() { return column; }
+    public Column getColumn() {
+        return column;
+    }
+
+    public void setColumn(Column column) {
+        this.column = column;
+    }
 
     public ColumnPosition getColPos() {
         return colPos;
@@ -56,11 +68,33 @@ public class ModifyColumnClause extends AlterTableClause {
         this.properties = properties;
     }
 
+    public ModifyColumnClause(String sql, Column column, ColumnPosition colPos, String rollup,
+            Map<String, String> properties) {
+        super(AlterOpType.SCHEMA_CHANGE);
+        this.sql = sql;
+        this.column = column;
+        this.colPos = colPos;
+        this.rollupName = rollup;
+        this.properties = properties;
+    }
+
     @Override
-    public void analyze(Analyzer analyzer) throws AnalysisException {
+    public void analyze(Analyzer analyzer) throws AnalysisException, DdlException {
         if (columnDef == null) {
             throw new AnalysisException("No column definition in modify column clause.");
         }
+        if (tableName != null) {
+            Table table = Env.getCurrentInternalCatalog().getDbOrDdlException(tableName.getDb())
+                    .getTableOrDdlException(tableName.getTbl());
+            if (table instanceof OlapTable && ((OlapTable) table).getKeysType() == KeysType.AGG_KEYS
+                    && columnDef.getAggregateType() == null) {
+                columnDef.setIsKey(true);
+            }
+            if (table instanceof OlapTable) {
+                columnDef.setKeysType(((OlapTable) table).getKeysType());
+            }
+        }
+
         columnDef.analyze(true);
         if (colPos != null) {
             colPos.analyze();
@@ -78,16 +112,30 @@ public class ModifyColumnClause extends AlterTableClause {
     }
 
     @Override
+    public boolean allowOpMTMV() {
+        return false;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return true;
+    }
+
+    @Override
     public String toSql() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("MODIFY COLUMN ").append(columnDef.toSql());
-        if (colPos != null) {
-            sb.append(" ").append(colPos);
+        if (sql != null) {
+            return sql;
+        } else {
+            StringBuilder sb = new StringBuilder();
+            sb.append("MODIFY COLUMN ").append(columnDef.toSql());
+            if (colPos != null) {
+                sb.append(" ").append(colPos);
+            }
+            if (rollupName != null) {
+                sb.append(" IN `").append(rollupName).append("`");
+            }
+            return sb.toString();
         }
-        if (rollupName != null) {
-            sb.append(" IN `").append(rollupName).append("`");
-        }
-        return sb.toString();
     }
 
     @Override

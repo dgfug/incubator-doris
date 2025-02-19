@@ -26,9 +26,8 @@ import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PrimitiveType;
 
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-
+import org.apache.commons.collections.map.CaseInsensitiveMap;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -45,7 +44,7 @@ public class HashDistributionPrunerTest {
         for (long i = 0; i < 300; i++) {
             tabletIds.add(i);
         }
-        
+
         // distribution columns
         Column dealDate = new Column("dealDate", PrimitiveType.DATE, false);
         Column mainBrandId = new Column("main_brand_id", PrimitiveType.CHAR, false);
@@ -53,12 +52,12 @@ public class HashDistributionPrunerTest {
         Column channel = new Column("channel", PrimitiveType.CHAR, false);
         Column shopType = new Column("shop_type", PrimitiveType.CHAR, false);
         List<Column> columns = Lists.newArrayList(dealDate, mainBrandId, itemThirdCateId, channel, shopType);
-        
+
         // filters
         PartitionColumnFilter dealDatefilter = new PartitionColumnFilter();
         dealDatefilter.setLowerBound(new StringLiteral("2019-08-22"), true);
         dealDatefilter.setUpperBound(new StringLiteral("2019-08-22"), true);
-        
+
         PartitionColumnFilter mainBrandFilter = new PartitionColumnFilter();
         List<Expr> inList = Lists.newArrayList();
         inList.add(new StringLiteral("1323"));
@@ -67,47 +66,47 @@ public class HashDistributionPrunerTest {
         inList.add(new StringLiteral("3893"));
         inList.add(new StringLiteral("6121"));
         mainBrandFilter.setInPredicate(new InPredicate(new SlotRef(null, "main_brand_id"), inList, false));
-        
+
         PartitionColumnFilter itemThirdFilter = new PartitionColumnFilter();
         List<Expr> inList2 = Lists.newArrayList();
         inList2.add(new StringLiteral("9719"));
         inList2.add(new StringLiteral("11163"));
         itemThirdFilter.setInPredicate(new InPredicate(new SlotRef(null, "item_third_cate_id"), inList2, false));
-        
+
         PartitionColumnFilter channelFilter = new PartitionColumnFilter();
         List<Expr> inList3 = Lists.newArrayList();
         inList3.add(new StringLiteral("1"));
         inList3.add(new StringLiteral("3"));
         channelFilter.setInPredicate(new InPredicate(new SlotRef(null, "channel"), inList3, false));
-        
+
         PartitionColumnFilter shopTypeFilter = new PartitionColumnFilter();
         List<Expr> inList4 = Lists.newArrayList();
         inList4.add(new StringLiteral("2"));
         shopTypeFilter.setInPredicate(new InPredicate(new SlotRef(null, "shop_type"), inList4, false));
-        
-        Map<String, PartitionColumnFilter> filters = Maps.newHashMap();
-        filters.put("dealDate", dealDatefilter);
-        filters.put("main_brand_id", mainBrandFilter);
-        filters.put("item_third_cate_id", itemThirdFilter);
-        filters.put("channel", channelFilter);
-        filters.put("shop_type", shopTypeFilter);
-       
-        HashDistributionPruner pruner = new HashDistributionPruner(tabletIds, columns, filters, tabletIds.size());
+
+        Map<String, PartitionColumnFilter> filters = new CaseInsensitiveMap();
+        filters.put("DEALDATE", dealDatefilter);
+        filters.put("MAIN_BRAND_ID", mainBrandFilter);
+        filters.put("ITEM_THIRD_CATE_ID", itemThirdFilter);
+        filters.put("CHANNEL", channelFilter);
+        filters.put("SHOP_TYPE", shopTypeFilter);
+
+        HashDistributionPruner pruner = new HashDistributionPruner(tabletIds, columns, filters, tabletIds.size(), true);
 
         Collection<Long> results = pruner.prune();
         // 20 = 1 * 5 * 2 * 2 * 1 (element num of each filter)
         Assert.assertEquals(20, results.size());
 
-        filters.get("shop_type").getInPredicate().addChild(new StringLiteral("4"));
+        filters.get("SHOP_TYPE").getInPredicate().addChild(new StringLiteral("4"));
         results = pruner.prune();
         // 40 = 1 * 5 * 2 * 2 * 2 (element num of each filter)
         // 39 is because these is hash conflict
         Assert.assertEquals(39, results.size());
-        
-        filters.get("shop_type").getInPredicate().addChild(new StringLiteral("5"));
-        filters.get("shop_type").getInPredicate().addChild(new StringLiteral("6"));
-        filters.get("shop_type").getInPredicate().addChild(new StringLiteral("7"));
-        filters.get("shop_type").getInPredicate().addChild(new StringLiteral("8"));
+
+        filters.get("SHOP_TYPE").getInPredicate().addChild(new StringLiteral("5"));
+        filters.get("SHOP_TYPE").getInPredicate().addChild(new StringLiteral("6"));
+        filters.get("SHOP_TYPE").getInPredicate().addChild(new StringLiteral("7"));
+        filters.get("SHOP_TYPE").getInPredicate().addChild(new StringLiteral("8"));
         results = pruner.prune();
         // 120 = 1 * 5 * 2 * 2 * 6 (element num of each filter) > 100
         Assert.assertEquals(300, results.size());

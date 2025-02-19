@@ -17,36 +17,35 @@
 
 package org.apache.doris.analysis;
 
-import com.google.common.base.Strings;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
-import org.apache.doris.common.util.SymmetricEncryption;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 public class SetLdapPassVar extends SetVar {
-    private String passwd;
+    private final PassVar passVar;
 
-    public SetLdapPassVar(String passwd) {
-        //  Encrypted password
-        this.passwd = SymmetricEncryption.encrypt(passwd);
+    public SetLdapPassVar(PassVar passVar) {
+        this.passVar = passVar;
+        this.varType = SetVarType.SET_LDAP_PASS_VAR;
     }
 
     public String getLdapPassword() {
-        return passwd;
+        return passVar.getText();
     }
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NO_SELECT_CLUSTER);
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR,
+                    PrivPredicate.ADMIN.getPrivs().toString());
         }
-
-        if (!ConnectContext.get().getCurrentUserIdentity().getQualifiedUser().equals(PaloAuth.ROOT_USER)
-                && !ConnectContext.get().getCurrentUserIdentity().getQualifiedUser().equals(PaloAuth.ADMIN_USER)) {
-            throw new AnalysisException("Only root and admin user can set ldap admin password.");
+        if (!passVar.isPlain()) {
+            throw new AnalysisException("Only support set ldap password with plain text");
         }
+        passVar.analyze();
     }
 
     @Override

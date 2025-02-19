@@ -15,12 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -36,7 +34,7 @@ import java.util.List;
   Show routine load progress by routine load name
 
   syntax:
-      SHOW [ALL] ROUTINE LOAD [database.][name]
+      SHOW [ALL] ROUTINE LOAD [FOR JobName] [LIKE pattern]
 
       without ALL: only show job which is not final
       with ALL: show all of job include history job
@@ -50,19 +48,21 @@ import java.util.List;
 
       example:
         show routine load named test in database1
-        SHOW ROUTINE LOAD database1.test;
-
-        show routine load in database1
-        SHOW ROUTINE LOAD database1;
+        use database1
+        SHOW ROUTINE LOAD for test;
 
         show routine load in database1 include history
         use database1;
         SHOW ALL ROUTINE LOAD;
 
+        show routine load in database1 whose name match pattern "%test%"
+        use database1;
+        SHOW ROUTINE LOAD LIKE "%test%";
+
         show routine load in all of database
         please use show proc
  */
-public class ShowRoutineLoadStmt extends ShowStmt {
+public class ShowRoutineLoadStmt extends ShowStmt implements NotFallbackInParser {
 
     private static final ImmutableList<String> TITLE_NAMES =
             new ImmutableList.Builder<String>()
@@ -73,6 +73,7 @@ public class ShowRoutineLoadStmt extends ShowStmt {
                     .add("EndTime")
                     .add("DbName")
                     .add("TableName")
+                    .add("IsMultiTable")
                     .add("State")
                     .add("DataSourceType")
                     .add("CurrentTaskNum")
@@ -81,20 +82,24 @@ public class ShowRoutineLoadStmt extends ShowStmt {
                     .add("CustomProperties")
                     .add("Statistic")
                     .add("Progress")
+                    .add("Lag")
                     .add("ReasonOfStateChanged")
                     .add("ErrorLogUrls")
                     .add("OtherMsg")
+                    .add("User")
+                    .add("Comment")
                     .build();
 
     private final LabelName labelName;
     private String dbFullName; // optional
     private String name; // optional
     private boolean includeHistory = false;
+    private String pattern; // optional
 
-
-    public ShowRoutineLoadStmt(LabelName labelName, boolean includeHistory) {
+    public ShowRoutineLoadStmt(LabelName labelName, boolean includeHistory, String pattern) {
         this.labelName = labelName;
         this.includeHistory = includeHistory;
+        this.pattern = pattern;
     }
 
     public String getDbFullName() {
@@ -109,6 +114,10 @@ public class ShowRoutineLoadStmt extends ShowStmt {
         return includeHistory;
     }
 
+    public String getPattern() {
+        return pattern;
+    }
+
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
         super.analyze(analyzer);
@@ -116,14 +125,12 @@ public class ShowRoutineLoadStmt extends ShowStmt {
     }
 
     private void checkLabelName(Analyzer analyzer) throws AnalysisException {
-        String dbName = labelName == null ? null : labelName.getDbName();
-        if (Strings.isNullOrEmpty(dbName)) {
+        dbFullName = labelName == null ? null : labelName.getDbName();
+        if (Strings.isNullOrEmpty(dbFullName)) {
             dbFullName = analyzer.getContext().getDatabase();
             if (Strings.isNullOrEmpty(dbFullName)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            dbFullName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
         name = labelName == null ? null : labelName.getLabelName();
     }

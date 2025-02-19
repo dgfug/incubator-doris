@@ -19,34 +19,41 @@ package org.apache.doris.task;
 
 import org.apache.doris.analysis.BinaryPredicate;
 import org.apache.doris.analysis.BinaryPredicate.Operator;
+import org.apache.doris.analysis.CreateMaterializedViewStmt;
 import org.apache.doris.analysis.InPredicate;
 import org.apache.doris.analysis.IsNullPredicate;
 import org.apache.doris.analysis.LiteralExpr;
 import org.apache.doris.analysis.Predicate;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.common.MarkedCountDownLatch;
+import org.apache.doris.common.Status;
 import org.apache.doris.thrift.TBrokerScanRange;
+import org.apache.doris.thrift.TColumn;
 import org.apache.doris.thrift.TCondition;
 import org.apache.doris.thrift.TDescriptorTable;
 import org.apache.doris.thrift.TPriority;
 import org.apache.doris.thrift.TPushReq;
 import org.apache.doris.thrift.TPushType;
 import org.apache.doris.thrift.TResourceInfo;
+import org.apache.doris.thrift.TStatusCode;
 import org.apache.doris.thrift.TTaskType;
 
+import com.google.common.collect.Maps;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class PushTask extends AgentTask {
-    private static final Logger LOG = LogManager.getLogger(CreateReplicaTask.class);
+    private static final Logger LOG = LogManager.getLogger(PushTask.class);
 
     private long replicaId;
     private int schemaHash;
     private long version;
-    private long versionHash;
     private String filePath;
     private long fileSize;
     private int timeoutSecond;
@@ -62,24 +69,29 @@ public class PushTask extends AgentTask {
     private TPriority priority;
     private boolean isSyncDelete;
     private long asyncDeleteJobId;
-    
+
     private long transactionId;
     private boolean isSchemaChanging;
 
     // for load v2 (spark load)
     private TBrokerScanRange tBrokerScanRange;
     private TDescriptorTable tDescriptorTable;
-    
-    public PushTask(TResourceInfo resourceInfo, long backendId, long dbId, long tableId, long partitionId,
-                    long indexId, long tabletId, long replicaId, int schemaHash, long version, long versionHash, 
-                    String filePath, long fileSize, int timeoutSecond, long loadJobId, TPushType pushType,
-                    List<Predicate> conditions, boolean needDecompress, TPriority priority, TTaskType taskType, 
-                    long transactionId, long signature) {
+
+    // for light schema change
+    private int schemaVersion;
+    private List<TColumn> columnsDesc = null;
+
+    private String vaultId;
+
+    public PushTask(TResourceInfo resourceInfo, long backendId, long dbId, long tableId, long partitionId, long indexId,
+            long tabletId, long replicaId, int schemaHash, long version, String filePath, long fileSize,
+            int timeoutSecond, long loadJobId, TPushType pushType, List<Predicate> conditions, boolean needDecompress,
+            TPriority priority, TTaskType taskType, long transactionId, long signature, List<TColumn> columnsDesc,
+            String vaultId, int schemaVersion) {
         super(resourceInfo, backendId, taskType, dbId, tableId, partitionId, indexId, tabletId, signature);
         this.replicaId = replicaId;
         this.schemaHash = schemaHash;
         this.version = version;
-        this.versionHash = versionHash;
         this.filePath = filePath;
         this.fileSize = fileSize;
         this.timeoutSecond = timeoutSecond;
@@ -94,33 +106,25 @@ public class PushTask extends AgentTask {
         this.transactionId = transactionId;
         this.tBrokerScanRange = null;
         this.tDescriptorTable = null;
-    }
-
-    public PushTask(TResourceInfo resourceInfo, long backendId, long dbId, long tableId, long partitionId,
-            long indexId, long tabletId, long replicaId, int schemaHash, long version, long versionHash, 
-            String filePath, long fileSize, int timeoutSecond, long loadJobId, TPushType pushType,
-            List<Predicate> conditions, boolean needDecompress, TPriority priority) {
-        this(resourceInfo, backendId, dbId, tableId, partitionId, indexId, 
-             tabletId, replicaId, schemaHash, version, versionHash, filePath, 
-             fileSize, timeoutSecond, loadJobId, pushType, conditions, needDecompress, 
-             priority, TTaskType.PUSH, -1, tableId);
+        this.columnsDesc = columnsDesc;
+        this.vaultId = vaultId;
+        this.schemaVersion = schemaVersion;
     }
 
     // for load v2 (SparkLoadJob)
     public PushTask(long backendId, long dbId, long tableId, long partitionId, long indexId, long tabletId,
-                    long replicaId, int schemaHash, int timeoutSecond, long loadJobId, TPushType pushType,
-                    TPriority priority, long transactionId, long signature,
-                    TBrokerScanRange tBrokerScanRange, TDescriptorTable tDescriptorTable) {
-        this(null, backendId, dbId, tableId, partitionId, indexId,
-             tabletId, replicaId, schemaHash, -1, 0, null,
-             0, timeoutSecond, loadJobId, pushType, null, false,
-             priority, TTaskType.REALTIME_PUSH, transactionId, signature);
+            long replicaId, int schemaHash, int timeoutSecond, long loadJobId, TPushType pushType, TPriority priority,
+            long transactionId, long signature, TBrokerScanRange tBrokerScanRange, TDescriptorTable tDescriptorTable,
+            List<TColumn> columnsDesc, String vaultId, int schemaVersion) {
+        this(null, backendId, dbId, tableId, partitionId, indexId, tabletId, replicaId, schemaHash, -1, null, 0,
+                timeoutSecond, loadJobId, pushType, null, false, priority, TTaskType.REALTIME_PUSH, transactionId,
+                signature, columnsDesc, vaultId, schemaVersion);
         this.tBrokerScanRange = tBrokerScanRange;
         this.tDescriptorTable = tDescriptorTable;
     }
 
     public TPushReq toThrift() {
-        TPushReq request = new TPushReq(tabletId, schemaHash, version, versionHash, timeoutSecond, pushType);
+        TPushReq request = new TPushReq(tabletId, schemaHash, version, 0 /*versionHash*/, timeoutSecond, pushType);
         if (taskType == TTaskType.REALTIME_PUSH) {
             request.setPartitionId(partitionId);
             request.setTransactionId(transactionId);
@@ -128,7 +132,6 @@ public class PushTask extends AgentTask {
         request.setIsSchemaChanging(isSchemaChanging);
         switch (pushType) {
             case LOAD:
-            case LOAD_DELETE:
                 request.setHttpFilePath(filePath);
                 if (fileSize != -1) {
                     request.setHttpFileSize(fileSize);
@@ -137,36 +140,48 @@ public class PushTask extends AgentTask {
                 break;
             case DELETE:
                 List<TCondition> tConditions = new ArrayList<TCondition>();
+                Map<String, TColumn> colNameToColDesc = columnsDesc.stream()
+                        .collect(Collectors.toMap(c -> c.getColumnName(), Function.identity(), (v1, v2) -> v1,
+                                () -> Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER)));
                 for (Predicate condition : conditions) {
                     TCondition tCondition = new TCondition();
                     ArrayList<String> conditionValues = new ArrayList<String>();
+                    SlotRef slotRef = (SlotRef) condition.getChild(0);
+                    String columnName = new String(slotRef.getColumnName());
+                    TColumn column = colNameToColDesc.get(slotRef.getColumnName());
+                    if (column == null) {
+                        columnName = CreateMaterializedViewStmt.mvColumnBuilder(columnName);
+                        column = colNameToColDesc.get(columnName);
+                        // condition's name and column's name may have inconsistent case
+                        columnName = column.getColumnName();
+                    }
+
+                    tCondition.setColumnName(columnName);
+                    int uniqueId = column.getColUniqueId();
+                    if (uniqueId >= 0) {
+                        tCondition.setColumnUniqueId(uniqueId);
+                    }
                     if (condition instanceof BinaryPredicate) {
                         BinaryPredicate binaryPredicate = (BinaryPredicate) condition;
-                        String columnName = ((SlotRef) binaryPredicate.getChild(0)).getColumnName();
                         String value = ((LiteralExpr) binaryPredicate.getChild(1)).getStringValue();
                         Operator op = binaryPredicate.getOp();
-                        tCondition.setColumnName(columnName);
                         tCondition.setConditionOp(op.toString());
                         conditionValues.add(value);
                     } else if (condition instanceof IsNullPredicate) {
                         IsNullPredicate isNullPredicate = (IsNullPredicate) condition;
-                        String columnName = ((SlotRef) isNullPredicate.getChild(0)).getColumnName();
                         String op = "IS";
                         String value = "NULL";
                         if (isNullPredicate.isNotNull()) {
                             value = "NOT NULL";
                         }
-                        tCondition.setColumnName(columnName);
                         tCondition.setConditionOp(op);
                         conditionValues.add(value);
                     } else if (condition instanceof InPredicate) {
                         InPredicate inPredicate = (InPredicate) condition;
-                        String columnName = ((SlotRef) inPredicate.getChild(0)).getColumnName();
                         String op = inPredicate.isNotIn() ? "!*=" : "*=";
-                        tCondition.setColumnName(columnName);
                         tCondition.setConditionOp(op);
                         for (int i = 1; i <= inPredicate.getInElementNum(); i++) {
-                            conditionValues.add(((LiteralExpr)inPredicate.getChild(i)).getStringValue());
+                            conditionValues.add(inPredicate.getChild(i).getStringValue());
                         }
                     }
 
@@ -184,10 +199,12 @@ public class PushTask extends AgentTask {
                 LOG.warn("unknown push type. type: " + pushType.name());
                 break;
         }
-
+        request.setColumnsDesc(columnsDesc);
+        request.setStorageVaultId(this.vaultId);
+        request.setSchemaVersion(schemaVersion);
         return request;
     }
-    
+
     public void setCountDownLatch(MarkedCountDownLatch latch) {
         this.latch = latch;
     }
@@ -195,8 +212,20 @@ public class PushTask extends AgentTask {
     public void countDownLatch(long backendId, long tabletId) {
         if (this.latch != null) {
             if (latch.markedCountDown(backendId, tabletId)) {
-                LOG.debug("pushTask current latch count: {}. backend: {}, tablet:{}",
-                         latch.getCount(), backendId, tabletId);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("pushTask current latch count: {}. backend: {}, tablet:{}", latch.getCount(), backendId,
+                            tabletId);
+                }
+            }
+        }
+    }
+
+    // call this always means one of tasks is failed. count down to zero to finish entire task
+    public void countDownToZero(TStatusCode code, String errMsg) {
+        if (this.latch != null) {
+            latch.countDownToZero(new Status(code, errMsg));
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("PushTask count down to zero. error msg: {}", errMsg);
             }
         }
     }
@@ -204,23 +233,19 @@ public class PushTask extends AgentTask {
     public long getReplicaId() {
         return replicaId;
     }
-    
+
     public int getSchemaHash() {
         return schemaHash;
     }
-    
+
     public long getVersion() {
         return version;
-    }
-    
-    public long getVersionHash() {
-        return versionHash;
     }
 
     public long getLoadJobId() {
         return loadJobId;
     }
-    
+
     public TPushType getPushType() {
         return pushType;
     }
@@ -248,7 +273,7 @@ public class PushTask extends AgentTask {
     public long getTransactionId() {
         return transactionId;
     }
-    
+
     public void setIsSchemaChanging(boolean isSchemaChanging) {
         this.isSchemaChanging = isSchemaChanging;
     }

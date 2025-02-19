@@ -17,12 +17,13 @@
 
 package org.apache.doris.persist;
 
-import com.google.common.collect.Lists;
-import com.google.gson.annotations.SerializedName;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonUtils;
+
+import com.google.common.collect.Lists;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -41,18 +42,22 @@ public class AlterViewInfo implements Writable {
     private long sqlMode;
     @SerializedName(value = "newFullSchema")
     private List<Column> newFullSchema;
+    @SerializedName(value = "comment")
+    private String comment;
 
     public AlterViewInfo() {
         // for persist
         newFullSchema = Lists.newArrayList();
     }
 
-    public AlterViewInfo(long dbId, long tableId, String inlineViewDef, List<Column> newFullSchema, long sqlMode) {
+    public AlterViewInfo(long dbId, long tableId, String inlineViewDef, List<Column> newFullSchema, long sqlMode,
+                         String comment) {
         this.dbId = dbId;
         this.tableId = tableId;
         this.inlineViewDef = inlineViewDef;
         this.newFullSchema = newFullSchema;
         this.sqlMode = sqlMode;
+        this.comment = comment;
     }
 
     public long getDbId() {
@@ -75,6 +80,10 @@ public class AlterViewInfo implements Writable {
         return sqlMode;
     }
 
+    public String getComment() {
+        return comment;
+    }
+
     @Override
     public int hashCode() {
         return Objects.hash(dbId, tableId, inlineViewDef, sqlMode, newFullSchema);
@@ -82,14 +91,16 @@ public class AlterViewInfo implements Writable {
 
     @Override
     public boolean equals(Object other) {
-        if (other == this) return true;
+        if (other == this) {
+            return true;
+        }
         if (!(other instanceof AlterViewInfo)) {
             return false;
         }
         AlterViewInfo otherInfo = (AlterViewInfo) other;
-        return dbId == otherInfo.getDbId() && tableId == otherInfo.getTableId() &&
-                inlineViewDef.equalsIgnoreCase(otherInfo.getInlineViewDef()) && sqlMode == otherInfo.getSqlMode() &&
-                newFullSchema.equals(otherInfo.getNewFullSchema());
+        return dbId == otherInfo.getDbId() && tableId == otherInfo.getTableId()
+                && inlineViewDef.equalsIgnoreCase(otherInfo.getInlineViewDef()) && sqlMode == otherInfo.getSqlMode()
+                && newFullSchema.equals(otherInfo.getNewFullSchema()) && Objects.equals(comment, otherInfo.comment);
     }
 
     @Override
@@ -101,5 +112,9 @@ public class AlterViewInfo implements Writable {
     public static AlterViewInfo read(DataInput in) throws IOException {
         String json = Text.readString(in);
         return GsonUtils.GSON.fromJson(json, AlterViewInfo.class);
+    }
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
     }
 }

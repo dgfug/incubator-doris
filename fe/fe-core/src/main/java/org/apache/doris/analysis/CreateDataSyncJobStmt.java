@@ -17,13 +17,11 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
@@ -51,7 +49,7 @@ import java.util.Map;
 //      binlog_desc:
 //          FROM BINLOG
 //          (key1=value1, ...)
-public class CreateDataSyncJobStmt extends DdlStmt {
+public class CreateDataSyncJobStmt extends DdlStmt implements NotFallbackInParser {
     private String jobName;
     private String dbName;
     private DataSyncJobType dataSyncJobType;
@@ -77,11 +75,6 @@ public class CreateDataSyncJobStmt extends DdlStmt {
             }
             dbName = analyzer.getDefaultDb();
         }
-        dbName = ClusterNamespace.getFullName(analyzer.getClusterName(), dbName);
-
-        if (!Config.enable_create_sync_job) {
-            throw new AnalysisException("Mysql sync job is coming soon.");
-        }
 
         if (binlogDesc != null) {
             binlogDesc.analyze();
@@ -98,13 +91,15 @@ public class CreateDataSyncJobStmt extends DdlStmt {
         for (ChannelDescription channelDescription : channelDescriptions) {
             channelDescription.analyze(dbName);
             String tableName = channelDescription.getTargetTable();
-            Database db = Catalog.getCurrentCatalog().getDbOrAnalysisException(dbName);
+            Database db = Env.getCurrentInternalCatalog().getDbOrAnalysisException(dbName);
             OlapTable olapTable = db.getOlapTableOrAnalysisException(tableName);
             if (olapTable.getKeysType() != KeysType.UNIQUE_KEYS) {
-                throw new AnalysisException("Table: " + tableName + " is not a unique table, key type: " + olapTable.getKeysType());
+                throw new AnalysisException("Table: " + tableName
+                        + " is not a unique table, key type: " + olapTable.getKeysType());
             }
             if (!olapTable.hasDeleteSign()) {
-                throw new AnalysisException("Table: " + tableName + " don't support batch delete. Please upgrade it to support, see `help alter table`.");
+                throw new AnalysisException("Table: " + tableName
+                        + " don't support batch delete. Please upgrade it to support, see `help alter table`.");
             }
         }
     }
@@ -131,5 +126,10 @@ public class CreateDataSyncJobStmt extends DdlStmt {
 
     public DataSyncJobType getDataSyncJobType() {
         return dataSyncJobType;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

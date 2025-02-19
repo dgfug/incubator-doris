@@ -19,33 +19,31 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.collect.Lists;
-
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.List;
 
-import mockit.Mocked;
-
 public class SetUserPropertyStmtTest {
     private Analyzer analyzer;
 
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
     }
 
     @Test
@@ -56,7 +54,7 @@ public class SetUserPropertyStmtTest {
 
         SetUserPropertyStmt stmt = new SetUserPropertyStmt("testUser", propertyVarList);
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:testUser", stmt.getUser());
+        Assert.assertEquals("testUser", stmt.getUser());
     }
 
     @Test(expected = AnalysisException.class)

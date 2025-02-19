@@ -29,15 +29,31 @@ struct TTabletInfo {
     3: required Types.TVersion version
     4: required Types.TVersionHash version_hash
     5: required Types.TCount row_count
+    // data size on local disk
     6: required Types.TSize data_size
     7: optional Types.TStorageMedium storage_medium
     8: optional list<Types.TTransactionId> transaction_ids
-    9: optional i64 version_count
+    9: optional i64 total_version_count
     10: optional i64 path_hash
     11: optional bool version_miss
     12: optional bool used
     13: optional Types.TPartitionId partition_id
     14: optional bool is_in_memory
+    15: optional Types.TReplicaId replica_id
+    // data size on remote storage
+    16: optional Types.TSize remote_data_size
+    // 17: optional Types.TReplicaId cooldown_replica_id
+    // 18: optional bool is_cooldown
+    19: optional i64 cooldown_term
+    20: optional Types.TUniqueId cooldown_meta_id
+    21: optional i64 visible_version_count
+    22: optional i64 local_index_size = 0      // .idx
+    23: optional i64 local_segment_size = 0    // .dat
+    24: optional i64 remote_index_size = 0     // .idx
+    25: optional i64 remote_segment_size = 0   // .dat
+
+    // For cloud
+    1000: optional bool is_persistent
 }
 
 struct TFinishTaskRequest {
@@ -57,6 +73,11 @@ struct TFinishTaskRequest {
     14: optional list<Types.TTabletId> downloaded_tablet_ids
     15: optional i64 copy_size
     16: optional i64 copy_time_ms
+    17: optional map<Types.TTabletId, Types.TVersion> succ_tablets
+    18: optional map<i64, i64> table_id_to_delta_num_rows
+    19: optional map<i64, map<i64, i64>> table_id_to_tablet_id_to_delta_num_rows
+    // for Cloud mow table only, used by FE to check if the response is for the latest request
+    20: optional list<AgentService.TCalcDeleteBitmapPartitionInfo> resp_partitions;
 }
 
 struct TTablet {
@@ -66,11 +87,14 @@ struct TTablet {
 struct TDisk {
     1: required string root_path
     2: required Types.TSize disk_total_capacity
+    // local used capacity
     3: required Types.TSize data_used_capacity
     4: required bool used
     5: optional Types.TSize disk_available_capacity
     6: optional i64 path_hash
     7: optional Types.TStorageMedium storage_medium
+    8: optional Types.TSize remote_used_capacity
+    9: optional Types.TSize trash_used_capacity
 }
 
 struct TPluginInfo {
@@ -89,6 +113,13 @@ struct TReportRequest {
     // the max compaction score of all tablets on a backend,
     // this field should be set along with tablet report
     8: optional i64 tablet_max_compaction_score
+    9: optional list<AgentService.TStoragePolicy> storage_policy // only id and version
+    10: optional list<AgentService.TStorageResource> resource // only id and version
+    11: i32 num_cores
+    12: i32 pipeline_executor_size
+    13: optional map<Types.TPartitionId, Types.TVersion> partitions_version
+    // tablet num in be, in cloud num_tablets may not eq tablet_list.size()
+    14: optional i64 num_tablets
 }
 
 struct TMasterResult {
@@ -96,7 +127,7 @@ struct TMasterResult {
     1: required Status.TStatus status
 }
 
-// Now we only support CPU share.
+// Deprecated
 enum TResourceType {
     TRESOURCE_CPU_SHARE
     TRESOURCE_IO_SHARE
@@ -110,11 +141,12 @@ enum TResourceType {
     TRESOURCE_HDD_WRITE_MBPS
 }
 
+// Deprecated
 struct TResourceGroup {
     1: required map<TResourceType, i32> resourceByType
 }
 
-// Resource per user
+// Deprecated
 struct TUserResource {
     1: required TResourceGroup resource
 
@@ -122,6 +154,7 @@ struct TUserResource {
     2: required map<string, i32> shareByGroup
 }
 
+// Deprecated
 struct TFetchResourceResult {
     // Master service not find protocol version, so using agent service version
     1: required AgentService.TAgentServiceVersion protocolVersion

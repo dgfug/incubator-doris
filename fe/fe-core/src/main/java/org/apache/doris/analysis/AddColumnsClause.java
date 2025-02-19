@@ -29,14 +29,33 @@ import com.google.common.collect.Lists;
 import java.util.List;
 import java.util.Map;
 
-// add some columns to one index.
+/**
+ * add some columns to one index.
+ */
 public class AddColumnsClause extends AlterTableClause {
     private List<ColumnDef> columnDefs;
+    private String sql;
     private String rollupName;
 
     private Map<String, String> properties;
     // set in analyze
     private List<Column> columns;
+
+    public AddColumnsClause(List<ColumnDef> columnDefs, String rollupName, Map<String, String> properties) {
+        super(AlterOpType.SCHEMA_CHANGE);
+        this.columnDefs = columnDefs;
+        this.rollupName = rollupName;
+        this.properties = properties;
+    }
+
+    // for nereids
+    public AddColumnsClause(String sql, List<Column> columns, String rollupName, Map<String, String> properties) {
+        super(AlterOpType.SCHEMA_CHANGE);
+        this.sql = sql;
+        this.columns = columns;
+        this.rollupName = rollupName;
+        this.properties = properties;
+    }
 
     public List<Column> getColumns() {
         return columns;
@@ -44,13 +63,6 @@ public class AddColumnsClause extends AlterTableClause {
 
     public String getRollupName() {
         return rollupName;
-    }
-
-    public AddColumnsClause(List<ColumnDef> columnDefs, String rollupName, Map<String, String> properties) {
-        super(AlterOpType.SCHEMA_CHANGE);
-        this.columnDefs = columnDefs;
-        this.rollupName = rollupName;
-        this.properties = properties;
     }
 
     @Override
@@ -77,27 +89,41 @@ public class AddColumnsClause extends AlterTableClause {
     }
 
     @Override
-    public Map<String, String> getProperties() {
-        return this.properties;
+    public boolean allowOpMTMV() {
+        return false;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return false;
     }
 
     @Override
     public String toSql() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("ADD COLUMN (");
-        int idx = 0;
-        for (ColumnDef columnDef : columnDefs) {
-            if (idx != 0) {
-                sb.append(", ");
+        if (sql != null) {
+            return sql;
+        } else {
+            StringBuilder sb = new StringBuilder();
+            sb.append("ADD COLUMN (");
+            int idx = 0;
+            for (ColumnDef columnDef : columnDefs) {
+                if (idx != 0) {
+                    sb.append(", ");
+                }
+                sb.append(columnDef.toSql());
+                idx++;
             }
-            sb.append(columnDef.toSql());
-            idx++;
+            sb.append(")");
+            if (rollupName != null) {
+                sb.append(" IN `").append(rollupName).append("`");
+            }
+            return sb.toString();
         }
-        sb.append(")");
-        if (rollupName != null) {
-            sb.append(" IN `").append(rollupName).append("`");
-        }
-        return sb.toString();
+    }
+
+    @Override
+    public Map<String, String> getProperties() {
+        return this.properties;
     }
 
     @Override

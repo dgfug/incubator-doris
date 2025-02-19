@@ -41,7 +41,7 @@ public class ParseUtil {
 
     private static Pattern dataVolumnPattern = Pattern.compile("(\\d+)(\\D*)");
 
-    public static long analyzeDataVolumn(String dataVolumnStr) throws AnalysisException {
+    public static long analyzeDataVolume(String dataVolumnStr) throws AnalysisException {
         long dataVolumn = 0;
         Matcher m = dataVolumnPattern.matcher(dataVolumnStr);
         if (m.matches()) {
@@ -81,6 +81,19 @@ public class ParseUtil {
             throw new AnalysisException("Replica volumn must larger than 0");
         }
         return replicaNumber;
+    }
+
+    public static long analyzeTransactionNumber(String transactionNumberStr) throws AnalysisException {
+        long transactionNumber = 0;
+        try {
+            transactionNumber = Long.parseLong(transactionNumberStr);
+        } catch (NumberFormatException nfe) {
+            throw new AnalysisException("invalid data volumn:" + transactionNumberStr);
+        }
+        if (transactionNumber <= 0L) {
+            throw new AnalysisException("Transaction quota size must larger than 0");
+        }
+        return transactionNumber;
     }
 
 }

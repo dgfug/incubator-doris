@@ -18,6 +18,7 @@
 package org.apache.doris.persist;
 
 import org.apache.doris.catalog.DynamicPartitionProperty;
+
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Test;
@@ -53,7 +54,7 @@ public class ModifyDynamicPartitionInfoTest {
         properties.put(DynamicPartitionProperty.END, "3");
         properties.put(DynamicPartitionProperty.PREFIX, "p");
         properties.put(DynamicPartitionProperty.BUCKETS, "30");
-        ModifyTablePropertyOperationLog modifyDynamicPartitionInfo = new ModifyTablePropertyOperationLog(100L, 200L, properties);
+        ModifyTablePropertyOperationLog modifyDynamicPartitionInfo = new ModifyTablePropertyOperationLog(100L, 200L, "test", properties);
         modifyDynamicPartitionInfo.write(out);
         out.flush();
         out.close();
@@ -65,5 +66,18 @@ public class ModifyDynamicPartitionInfoTest {
         Assert.assertEquals(readModifyDynamicPartitionInfo.getTableId(), 200L);
         Assert.assertEquals(readModifyDynamicPartitionInfo.getProperties(), properties);
         in.close();
+    }
+
+    @Test
+    public void testToSql() {
+        HashMap<String, String> properties = new HashMap<>();
+        properties.put(DynamicPartitionProperty.ENABLE, "true");
+        properties.put(DynamicPartitionProperty.TIME_UNIT, "day");
+        properties.put(DynamicPartitionProperty.START, "-3");
+        ModifyTablePropertyOperationLog modifyDynamicPartitionInfo = new ModifyTablePropertyOperationLog(100L, 200L,
+                "test", properties);
+        Assert.assertTrue(modifyDynamicPartitionInfo.toSql().contains("\"dynamic_partition.enable\" = \"true\""));
+        Assert.assertTrue(modifyDynamicPartitionInfo.toSql().contains("\"dynamic_partition.time_unit\" = \"day\""));
+        Assert.assertTrue(modifyDynamicPartitionInfo.toSql().contains("\"dynamic_partition.start\" = \"-3\""));
     }
 }

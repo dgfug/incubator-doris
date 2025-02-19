@@ -19,41 +19,41 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import mockit.Mocked;
-
 public class ShowCreateDbStmtTest {
 
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
     }
 
     @Test
     public void testNormal() throws AnalysisException, UserException {
-        ShowCreateDbStmt stmt = new ShowCreateDbStmt("testDb");
+        ShowCreateDbStmt stmt = new ShowCreateDbStmt(new DbName(InternalCatalog.INTERNAL_CATALOG_NAME, "testDb"));
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(true));
-        Assert.assertEquals("testCluster:testDb", stmt.getDb());
+        Assert.assertEquals("testDb", stmt.getDb());
         Assert.assertEquals(2, stmt.getMetaData().getColumnCount());
-        Assert.assertEquals("SHOW CREATE DATABASE `testCluster:testDb`", stmt.toString());
+        Assert.assertEquals("SHOW CREATE DATABASE `testDb`", stmt.toString());
     }
 
     @Test(expected = AnalysisException.class)
     public void testEmptyDb() throws AnalysisException, UserException {
-        ShowCreateDbStmt stmt = new ShowCreateDbStmt("");
+        ShowCreateDbStmt stmt = new ShowCreateDbStmt(new DbName(InternalCatalog.INTERNAL_CATALOG_NAME, ""));
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         Assert.fail("No exception throws.");
     }

@@ -14,19 +14,22 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/NullLiteral.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.FormatOptions;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 
 import com.google.common.base.Preconditions;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
@@ -49,6 +52,7 @@ public class NullLiteral extends LiteralExpr {
     public static NullLiteral create(Type type) {
         NullLiteral l = new NullLiteral();
         l.type = type;
+        l.analysisDone();
         return l;
     }
 
@@ -58,10 +62,10 @@ public class NullLiteral extends LiteralExpr {
 
     @Override
     protected void resetAnalysisState() {
-      super.resetAnalysisState();
-      type = Type.NULL;
+        super.resetAnalysisState();
+        type = Type.NULL;
     }
-    
+
     @Override
     public Expr clone() {
         return new NullLiteral(this);
@@ -82,6 +86,9 @@ public class NullLiteral extends LiteralExpr {
 
     @Override
     public int compareLiteral(LiteralExpr expr) {
+        if (expr instanceof PlaceHolderExpr) {
+            return this.compareLiteral(((PlaceHolderExpr) expr).getLiteral());
+        }
         if (expr instanceof NullLiteral) {
             return 0;
         }
@@ -96,6 +103,18 @@ public class NullLiteral extends LiteralExpr {
     @Override
     public String getStringValue() {
         return "NULL";
+    }
+
+    @Override
+    public String getStringValueInFe(FormatOptions options) {
+        return null;
+    }
+
+    // the null value inside an array is represented as "null", for exampe:
+    // [null, null]. Not same as other primitive type to represent as \N.
+    @Override
+    public String getStringValueForArray(FormatOptions options) {
+        return options.getNullFormat();
     }
 
     @Override
@@ -133,15 +152,10 @@ public class NullLiteral extends LiteralExpr {
         msg.node_type = TExprNodeType.NULL_LITERAL;
     }
 
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-    }
-
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
     }
-    
+
     public static NullLiteral read(DataInput in) throws IOException {
         NullLiteral literal = new NullLiteral();
         literal.readFields(in);

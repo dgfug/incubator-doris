@@ -19,26 +19,39 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.Function;
 import org.apache.doris.catalog.FunctionSet;
 import org.apache.doris.catalog.KeysType;
+import org.apache.doris.catalog.MaterializedIndexMeta;
+import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
+import org.apache.doris.common.DdlException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.rewrite.mvrewrite.CountFieldToSum;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -54,22 +67,29 @@ import java.util.Set;
  * ORDER BY column_name[, column_name ...])
  * [PROPERTIES ("key" = "value")]
  */
-public class CreateMaterializedViewStmt extends DdlStmt {
+public class CreateMaterializedViewStmt extends DdlStmt implements NotFallbackInParser {
+    private static final Logger LOG = LogManager.getLogger(CreateMaterializedViewStmt.class);
+
     public static final String MATERIALIZED_VIEW_NAME_PREFIX = "mv_";
+    public static final String MATERIALIZED_VIEW_AGGREGATE_NAME_PREFIX = "mva_";
+    public static final String MATERIALIZED_VIEW_AGGREGATE_NAME_LINK = "__";
     public static final Map<String, MVColumnPattern> FN_NAME_TO_PATTERN;
 
     static {
         FN_NAME_TO_PATTERN = Maps.newHashMap();
         FN_NAME_TO_PATTERN.put(AggregateType.SUM.name().toLowerCase(),
-                               new MVColumnOneChildPattern(AggregateType.SUM.name().toLowerCase()));
+                new MVColumnOneChildPattern(AggregateType.SUM.name().toLowerCase()));
         FN_NAME_TO_PATTERN.put(AggregateType.MIN.name().toLowerCase(),
-                               new MVColumnOneChildPattern(AggregateType.MIN.name().toLowerCase()));
+                new MVColumnOneChildPattern(AggregateType.MIN.name().toLowerCase()));
         FN_NAME_TO_PATTERN.put(AggregateType.MAX.name().toLowerCase(),
-                               new MVColumnOneChildPattern(AggregateType.MAX.name().toLowerCase()));
+                new MVColumnOneChildPattern(AggregateType.MAX.name().toLowerCase()));
         FN_NAME_TO_PATTERN.put(FunctionSet.COUNT, new MVColumnOneChildPattern(FunctionSet.COUNT));
         FN_NAME_TO_PATTERN.put(FunctionSet.BITMAP_UNION, new MVColumnBitmapUnionPattern());
         FN_NAME_TO_PATTERN.put(FunctionSet.HLL_UNION, new MVColumnHLLUnionPattern());
     }
+
+    public static final ImmutableSet<String> invalidFn = ImmutableSet.of("now", "current_time", "current_date",
+            "utc_timestamp", "uuid", "random", "unix_timestamp", "curdate");
 
     private String mvName;
     private SelectStmt selectStmt;
@@ -85,14 +105,26 @@ public class CreateMaterializedViewStmt extends DdlStmt {
      * This order of mvColumnItemList is meaningful.
      */
     private List<MVColumnItem> mvColumnItemList = Lists.newArrayList();
+    MVColumnItem whereClauseItem;
     private String baseIndexName;
     private String dbName;
     private KeysType mvKeysType = KeysType.DUP_KEYS;
+    //if process is replaying log, isReplay is true, otherwise is false, avoid replay process error report,
+    // only in Rollup or MaterializedIndexMeta is true
+    private boolean isReplay = false;
 
     public CreateMaterializedViewStmt(String mvName, SelectStmt selectStmt, Map<String, String> properties) {
         this.mvName = mvName;
         this.selectStmt = selectStmt;
         this.properties = properties;
+    }
+
+    public void setIsReplay(boolean isReplay) {
+        this.isReplay = isReplay;
+    }
+
+    public boolean isReplay() {
+        return isReplay;
     }
 
     public String getMVName() {
@@ -123,44 +155,110 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         return mvKeysType;
     }
 
-    @Override
-    public void analyze(Analyzer analyzer) throws UserException {
-        if (!Config.enable_materialized_view) {
-            throw new AnalysisException("The materialized view is disabled");
+    public Column getWhereClauseItemExpr(OlapTable olapTable) throws DdlException {
+        if (whereClauseItem == null) {
+            return null;
         }
-        super.analyze(analyzer);
-        FeNameFormat.checkTableName(mvName);
-        // TODO(ml): The mv name in from clause should pass the analyze without error.
-        selectStmt.forbiddenMVRewrite();
-        selectStmt.analyze(analyzer);
-        if (selectStmt.getAggInfo() != null) {
-            mvKeysType = KeysType.AGG_KEYS;
-        }
-        analyzeSelectClause();
-        analyzeFromClause();
-        if (selectStmt.getWhereClause() != null) {
-            throw new AnalysisException("The where clause is not supported in add materialized view clause, expr:"
-                                                + selectStmt.getWhereClause().toSql());
-        }
-        if (selectStmt.getHavingPred() != null) {
-            throw new AnalysisException("The having clause is not supported in add materialized view clause, expr:"
-                                                + selectStmt.getHavingPred().toSql());
-        }
-        analyzeOrderByClause();
-        if (selectStmt.getLimit() != -1) {
-            throw new AnalysisException("The limit clause is not supported in add materialized view clause, expr:"
-                                                + " limit " + selectStmt.getLimit());
+        return whereClauseItem.toMVColumn(olapTable);
+    }
+
+    public Expr getWhereClause() {
+        return selectStmt.getWhereClause();
+    }
+
+    private void checkExprValidInMv(Expr expr, String functionName) throws AnalysisException {
+        if (!isReplay && expr.haveFunction(functionName)) {
+            throw new AnalysisException("The materialized view contain " + functionName + " is disallowed");
         }
     }
 
-    public void analyzeSelectClause() throws AnalysisException {
+    private void checkExprValidInMv(Expr expr) throws AnalysisException {
+        if (isReplay) {
+            return;
+        }
+        for (String function : invalidFn) {
+            checkExprValidInMv(expr, function);
+        }
+    }
+
+    private void checkExprValidInMv() throws AnalysisException {
+        if (selectStmt.getWhereClause() != null) {
+            checkExprValidInMv(selectStmt.getWhereClause());
+        }
+        SelectList selectList = selectStmt.getSelectList();
+        for (SelectListItem selectListItem : selectList.getItems()) {
+            if (selectListItem.isStar()) {
+                throw new AnalysisException("The materialized view not support select star");
+            }
+            checkExprValidInMv(selectListItem.getExpr());
+        }
+    }
+
+    @Override
+    public void analyze(Analyzer analyzer) throws UserException {
+        super.analyze(analyzer);
+
+        checkExprValidInMv();
+
+        FeNameFormat.checkTableName(mvName);
+        rewriteToBitmapWithCheck();
+        // TODO(ml): The mv name in from clause should pass the analyze without error.
+        selectStmt.forbiddenMVRewrite();
+        if (isReplay) {
+            analyzer.setReplay();
+        }
+        selectStmt.analyze(analyzer);
+
+        ExprRewriter rewriter = analyzer.getExprRewriter();
+        rewriter.reset();
+        selectStmt.rewriteExprs(rewriter);
+        selectStmt.reset();
+        analyzer = new Analyzer(analyzer.getEnv(), analyzer.getContext());
+        if (isReplay) {
+            analyzer.setReplay();
+        }
+        selectStmt.analyze(analyzer);
+
+        analyzeSelectClause(analyzer);
+        analyzeFromClause();
+        if (selectStmt.getAggInfo() != null) {
+            mvKeysType = KeysType.AGG_KEYS;
+        }
+        if (selectStmt.getWhereClause() != null) {
+            if (!isReplay && selectStmt.getWhereClause().hasAggregateSlot()) {
+                throw new AnalysisException(
+                        "The where clause contained aggregate column is not supported, expr:"
+                                + selectStmt.getWhereClause().toSql());
+            }
+            whereClauseItem = new MVColumnItem(selectStmt.getWhereClause());
+        }
+        if (selectStmt.getHavingPred() != null) {
+            throw new AnalysisException("The having clause is not supported in add materialized view clause, expr:"
+                    + selectStmt.getHavingPred().toSql());
+        }
+        analyzeOrderByClause();
+        analyzeGroupByClause();
+        if (selectStmt.getLimit() != -1) {
+            throw new AnalysisException("The limit clause is not supported in add materialized view clause, expr:"
+                    + " limit " + selectStmt.getLimit());
+        }
+    }
+
+    @Override
+    public void checkPriv() throws AnalysisException {
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkTblPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, dbName, baseIndexName,
+                        PrivPredicate.ALTER)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ALTER");
+        }
+    }
+
+    public void analyzeSelectClause(Analyzer analyzer) throws AnalysisException {
         SelectList selectList = selectStmt.getSelectList();
         if (selectList.getItems().isEmpty()) {
             throw new AnalysisException("The materialized view must contain at least one column");
         }
         boolean meetAggregate = false;
-        // TODO(ml): support same column with different aggregation function
-        Set<String> mvColumnNameSet = Sets.newHashSet();
         /**
          * 1. The columns of mv must be a single column or a aggregate column without any calculate.
          *    Also the children of aggregate column must be a single column without any calculate.
@@ -172,53 +270,48 @@ public class CreateMaterializedViewStmt extends DdlStmt {
          */
         for (int i = 0; i < selectList.getItems().size(); i++) {
             SelectListItem selectListItem = selectList.getItems().get(i);
+
             Expr selectListItemExpr = selectListItem.getExpr();
-            if (!(selectListItemExpr instanceof SlotRef) && !(selectListItemExpr instanceof FunctionCallExpr)) {
+            selectListItemExpr.setDisableTableName(true);
+            Expr realItem = selectListItemExpr.unwrapExpr(false);
+            if (!(realItem instanceof SlotRef) && !(realItem instanceof FunctionCallExpr)
+                    && !(realItem instanceof ArithmeticExpr)) {
                 throw new AnalysisException("The materialized view only support the single column or function expr. "
-                                                    + "Error column: " + selectListItemExpr.toSql());
+                        + "Error column: " + selectListItemExpr.toSql());
             }
-            if (selectListItemExpr instanceof SlotRef) {
-                if (meetAggregate) {
-                    throw new AnalysisException("The aggregate column should be after the single column");
-                }
-                SlotRef slotRef = (SlotRef) selectListItemExpr;
-                // check duplicate column
-                String columnName = slotRef.getColumnName().toLowerCase();
-                if (!mvColumnNameSet.add(columnName)) {
-                    ErrorReport.reportAnalysisException(ErrorCode.ERR_DUP_FIELDNAME, columnName);
-                }
-                MVColumnItem mvColumnItem = new MVColumnItem(columnName, slotRef.getType());
-                mvColumnItemList.add(mvColumnItem);
-            } else if (selectListItemExpr instanceof FunctionCallExpr) {
-                // Function must match pattern.
+
+            if (!isReplay && selectListItemExpr.hasAutoInc()) {
+                throw new AnalysisException("The materialized view can not involved auto increment column");
+            }
+
+            if (selectListItemExpr instanceof FunctionCallExpr
+                    && ((FunctionCallExpr) selectListItemExpr).isAggregateFunction()) {
                 FunctionCallExpr functionCallExpr = (FunctionCallExpr) selectListItemExpr;
-                String functionName = functionCallExpr.getFnName().getFunction();
-                MVColumnPattern mvColumnPattern = FN_NAME_TO_PATTERN.get(functionName.toLowerCase());
-                if (mvColumnPattern == null) {
-                    throw new AnalysisException(
-                            "Materialized view does not support this function:" + functionCallExpr.toSqlImpl());
-                }
-                if (!mvColumnPattern.match(functionCallExpr)) {
-                    throw new AnalysisException(
-                            "The function " + functionName + " must match pattern:" + mvColumnPattern.toString());
-                }
-                // check duplicate column
-                List<SlotRef> slots = new ArrayList<>();
-                functionCallExpr.collect(SlotRef.class, slots);
-                Preconditions.checkArgument(slots.size() == 1);
-                String columnName = slots.get(0).getColumnName().toLowerCase();
-                if (!mvColumnNameSet.add(columnName)) {
-                    ErrorReport.reportAnalysisException(ErrorCode.ERR_DUP_FIELDNAME, columnName);
-                }
 
                 if (beginIndexOfAggregation == -1) {
                     beginIndexOfAggregation = i;
                 }
                 meetAggregate = true;
                 // build mv column item
-                mvColumnItemList.add(buildMVColumnItem(functionCallExpr));
-                // TODO(ml): support REPLACE, REPLACE_IF_NOT_NULL, bitmap_union, hll_union only for aggregate table
-                // TODO(ml): support different type of column, int -> bigint(sum)
+                mvColumnItemList.add(buildMVColumnItem(analyzer, functionCallExpr));
+            } else {
+                if (!isReplay && selectListItemExpr.containsAggregate()) {
+                    throw new AnalysisException(
+                            "The materialized view's expr calculations cannot be included outside aggregate functions"
+                                    + ", expr: " + selectListItemExpr.toSql());
+                }
+                List<SlotRef> slots = new ArrayList<>();
+                selectListItemExpr.collect(SlotRef.class, slots);
+                if (!isReplay && slots.size() == 0) {
+                    throw new AnalysisException(
+                            "The materialized view contain constant expr is disallowed, expr: "
+                                    + selectListItemExpr.toSql());
+                }
+                if (meetAggregate) {
+                    throw new AnalysisException("The aggregate column should be after the single column");
+                }
+                MVColumnItem mvColumnItem = new MVColumnItem(selectListItemExpr);
+                mvColumnItemList.add(mvColumnItem);
             }
         }
         // TODO(ml): only value columns of materialized view, such as select sum(v1) from table
@@ -232,9 +325,78 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         if (tableRefList.size() != 1) {
             throw new AnalysisException("The materialized view only support one table in from clause.");
         }
+        if (!isReplay && tableRefList.get(0).hasExplicitAlias()) {
+            throw new AnalysisException("The materialized view not support table with alias.");
+        }
+        if (!isReplay && !(tableRefList.get(0).getTable() instanceof OlapTable)) {
+            throw new AnalysisException("The materialized view only support olap table.");
+        }
+        OlapTable olapTable = (OlapTable) tableRefList.get(0).getTable();
+        mvKeysType = olapTable.getKeysType();
+
         TableName tableName = tableRefList.get(0).getName();
+        if (tableName == null) {
+            throw new AnalysisException("table in from clause is invalid, please check if it's single table "
+                    + "and not sub-query");
+        }
         baseIndexName = tableName.getTbl();
         dbName = tableName.getDb();
+    }
+
+    private void analyzeGroupByClause() throws AnalysisException {
+        if (isReplay) {
+            return;
+        }
+        if (selectStmt.getGroupByClause() == null && mvKeysType == KeysType.AGG_KEYS) {
+            throw new AnalysisException("agg mv must has group by clause");
+        }
+        if (selectStmt.getGroupByClause() == null) {
+            return;
+        }
+
+        List<Expr> groupingExprs = selectStmt.getGroupByClause().getGroupingExprs();
+        List<FunctionCallExpr> aggregateExprs = selectStmt.getAggInfo().getAggregateExprs();
+        List<Expr> selectExprs = selectStmt.getSelectList().getExprs();
+        for (Expr expr : selectExprs) {
+            boolean match = false;
+            String lhs = selectStmt.getExprFromAliasSMap(expr).toSqlWithoutTbl();
+            for (Expr groupExpr : groupingExprs) {
+                String rhs = selectStmt.getExprFromAliasSMap(groupExpr).toSqlWithoutTbl();
+                if (lhs.equalsIgnoreCase(rhs)) {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match) {
+                for (Expr groupExpr : aggregateExprs) {
+                    String rhs = selectStmt.getExprFromAliasSMap(groupExpr).toSqlWithoutTbl();
+                    if (lhs.equalsIgnoreCase(rhs)) {
+                        match = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!match) {
+                throw new AnalysisException("The select expr " + lhs + " not in grouping or aggregate columns");
+            }
+        }
+
+        Set<String> selectExprNames = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
+        for (Expr expr : selectExprs) {
+            String selectExprName = selectStmt.getExprFromAliasSMap(expr).toSqlWithoutTbl();
+            if (selectExprNames.contains(selectExprName)) {
+                throw new AnalysisException("The select expr " + selectExprName + " is duplicated.");
+            }
+            selectExprNames.add(selectExprName);
+        }
+
+        for (Expr expr : groupingExprs) {
+            String groupExprName = selectStmt.getExprFromAliasSMap(expr).toSqlWithoutTbl();
+            if (!selectExprNames.contains(groupExprName)) {
+                throw new AnalysisException("The grouping expr " + groupExprName + " not in select list.");
+            }
+        }
     }
 
     private void analyzeOrderByClause() throws AnalysisException {
@@ -246,22 +408,23 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         List<OrderByElement> orderByElements = selectStmt.getOrderByElements();
         if (orderByElements.size() > mvColumnItemList.size()) {
             throw new AnalysisException("The number of columns in order clause must be less than " + "the number of "
-                                                + "columns in select clause");
+                    + "columns in select clause");
         }
         if (beginIndexOfAggregation != -1 && (orderByElements.size() != (beginIndexOfAggregation))) {
             throw new AnalysisException("The key of columns in mv must be all of group by columns");
         }
         for (int i = 0; i < orderByElements.size(); i++) {
-            Expr orderByElement = orderByElements.get(i).getExpr();
-            if (!(orderByElement instanceof SlotRef)) {
-                throw new AnalysisException("The column in order clause must be original column without calculation. "
-                                                    + "Error column: " + orderByElement.toSql());
-            }
+            Expr orderByElement = selectStmt.getExprFromAliasSMapDirect(orderByElements.get(i).getExpr());
+
             MVColumnItem mvColumnItem = mvColumnItemList.get(i);
-            SlotRef slotRef = (SlotRef) orderByElement;
-            if (!mvColumnItem.getName().equalsIgnoreCase(slotRef.getColumnName())) {
+            if (mvColumnItem.getName() == null) {
+                throw new AnalysisException("mvColumnItem.getName() is null");
+            }
+
+            if (!mvColumnItem.getDefineExpr().equals(orderByElement)) {
                 throw new AnalysisException("The order of columns in order by clause must be same as "
-                                                    + "the order of columns in select list");
+                        + "the order of columns in select list, " + mvColumnItem.getDefineExpr().toSql() + " vs "
+                        + orderByElement.toSql());
             }
             Preconditions.checkState(mvColumnItem.getAggregationType() == null);
             mvColumnItem.setIsKey(true);
@@ -287,14 +450,7 @@ public class CreateMaterializedViewStmt extends DdlStmt {
          * The keys type of Materialized view is aggregation.
          * All of group by columns are keys of materialized view.
          */
-        if (mvKeysType == KeysType.AGG_KEYS) {
-            for (MVColumnItem mvColumnItem : mvColumnItemList) {
-                if (mvColumnItem.getAggregationType() != null) {
-                    break;
-                }
-                mvColumnItem.setIsKey(true);
-            }
-        } else if (mvKeysType == KeysType.DUP_KEYS) {
+        if (mvKeysType == KeysType.DUP_KEYS) {
             /**
              * There is no aggregation function in materialized view.
              * Supplement key of MV columns
@@ -312,14 +468,15 @@ public class CreateMaterializedViewStmt extends DdlStmt {
             for (; theBeginIndexOfValue < mvColumnItemList.size(); theBeginIndexOfValue++) {
                 MVColumnItem column = mvColumnItemList.get(theBeginIndexOfValue);
                 keySizeByte += column.getType().getIndexSize();
-                if (theBeginIndexOfValue + 1 > FeConstants.shortkey_max_column_count || keySizeByte > FeConstants.shortkey_maxsize_bytes) {
+                if (theBeginIndexOfValue + 1 > FeConstants.shortkey_max_column_count
+                        || keySizeByte > FeConstants.shortkey_maxsize_bytes) {
                     if (theBeginIndexOfValue == 0 && column.getType().getPrimitiveType().isCharFamily()) {
                         column.setIsKey(true);
                         theBeginIndexOfValue++;
                     }
                     break;
                 }
-                if (column.getType().isFloatingPointType()) {
+                if (!column.getType().couldBeShortKey()) {
                     break;
                 }
                 if (column.getType().getPrimitiveType() == PrimitiveType.VARCHAR) {
@@ -330,36 +487,47 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 column.setIsKey(true);
             }
             if (theBeginIndexOfValue == 0) {
-                throw new AnalysisException("The first column could not be float or double type, use decimal instead");
+                throw new AnalysisException(
+                    "The first column could not be float, double or complex "
+                    + "type like array, struct, map, json, variant.");
             }
             // supply value
             for (; theBeginIndexOfValue < mvColumnItemList.size(); theBeginIndexOfValue++) {
                 MVColumnItem mvColumnItem = mvColumnItemList.get(theBeginIndexOfValue);
                 mvColumnItem.setAggregationType(AggregateType.NONE, true);
             }
+        } else {
+            for (MVColumnItem mvColumnItem : mvColumnItemList) {
+                if (mvColumnItem.getAggregationType() != null) {
+                    break;
+                }
+                mvColumnItem.setIsKey(true);
+            }
         }
     }
 
-    private MVColumnItem buildMVColumnItem(FunctionCallExpr functionCallExpr) throws AnalysisException {
+    private Expr getAggfunctionSlot(FunctionCallExpr functionCallExpr) throws AnalysisException {
+        if (functionCallExpr.getFnParams() != null && functionCallExpr.getFnParams().isStar()) {
+            // convert count(*) to count(1)
+            return LiteralExpr.create("1", Type.BIGINT);
+        }
+        return functionCallExpr.getChildren().get(0);
+    }
+
+    private MVColumnItem buildMVColumnItem(Analyzer analyzer, FunctionCallExpr functionCallExpr)
+            throws AnalysisException {
+        if (!isReplay && !functionCallExpr.getOrderByElements().isEmpty()) {
+            throw new AnalysisException("The materialized-view do not support aggregate with order by elements.");
+        }
         String functionName = functionCallExpr.getFnName().getFunction();
-        List<SlotRef> slots = new ArrayList<>();
-        functionCallExpr.collect(SlotRef.class, slots);
-        Preconditions.checkArgument(slots.size() == 1);
-        SlotRef baseColumnRef = slots.get(0);
-        String baseColumnName = baseColumnRef.getColumnName().toLowerCase();
-        Column baseColumn = baseColumnRef.getColumn();
-        Preconditions.checkNotNull(baseColumn);
-        Type baseType = baseColumn.getOriginType();
-        Expr functionChild0 = functionCallExpr.getChild(0);
-        String mvColumnName;
-        AggregateType mvAggregateType;
-        Expr defineExpr = null;
+        Expr defineExpr = getAggfunctionSlot(functionCallExpr);
+        Type baseType = defineExpr.getType();
+        AggregateType mvAggregateType = null;
         Type type;
         switch (functionName.toLowerCase()) {
             case "sum":
-                mvColumnName = baseColumnName;
                 mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
-                PrimitiveType baseColumnType = baseColumnRef.getType().getPrimitiveType();
+                PrimitiveType baseColumnType = baseType.getPrimitiveType();
                 if (baseColumnType == PrimitiveType.TINYINT || baseColumnType == PrimitiveType.SMALLINT
                         || baseColumnType == PrimitiveType.INT) {
                     type = Type.BIGINT;
@@ -368,108 +536,125 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 } else {
                     type = baseType;
                 }
+                if (type != baseType) {
+                    defineExpr = new CastExpr(type, defineExpr);
+                    if (analyzer != null) {
+                        defineExpr.analyze(analyzer);
+                    }
+                }
                 break;
             case "min":
             case "max":
-                mvColumnName = baseColumnName;
-                mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
                 type = baseType;
                 break;
             case FunctionSet.BITMAP_UNION:
-                // Compatible aggregation models
-                if (baseColumnRef.getType().getPrimitiveType() == PrimitiveType.BITMAP) {
-                    mvColumnName = baseColumnName;
-                } else {
-                    mvColumnName = mvColumnBuilder(functionName, baseColumnName);
-                    defineExpr = functionChild0;
-                }
-                mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
                 type = Type.BITMAP;
+                if (!isReplay && analyzer != null && !baseType.isBitmapType()) {
+                    throw new AnalysisException(
+                            "BITMAP_UNION need input a bitmap column, but input " + baseType.toString());
+                }
                 break;
             case FunctionSet.HLL_UNION:
-                // Compatible aggregation models
-                if (baseColumnRef.getType().getPrimitiveType() == PrimitiveType.HLL) {
-                    mvColumnName = baseColumnName;
-                } else {
-                    mvColumnName = mvColumnBuilder(functionName, baseColumnName);
-                    defineExpr = functionChild0;
-                }
-                mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
                 type = Type.HLL;
+                if (!isReplay && analyzer != null && !baseType.isHllType()) {
+                    throw new AnalysisException("HLL_UNION need input a hll column, but input " + baseType.toString());
+                }
                 break;
             case FunctionSet.COUNT:
-                mvColumnName = mvColumnBuilder(functionName, baseColumnName);
                 mvAggregateType = AggregateType.SUM;
-                defineExpr = new CaseExpr(null, Lists.newArrayList(new CaseWhenClause(
-                        new IsNullPredicate(baseColumnRef, false),
-                        new IntLiteral(0, Type.BIGINT))), new IntLiteral(1, Type.BIGINT));
+                defineExpr = CountFieldToSum.slotToCaseWhen(defineExpr);
+                if (analyzer != null) {
+                    defineExpr.analyze(analyzer);
+                }
                 type = Type.BIGINT;
                 break;
             default:
-                throw new AnalysisException("Unsupported function:" + functionName);
+                mvAggregateType = AggregateType.GENERIC;
+                if (functionCallExpr.getParams().isDistinct() || functionCallExpr.getParams().isStar()) {
+                    throw new AnalysisException(
+                            "The Materialized-View's generic aggregation not support star or distinct");
+                }
+                defineExpr = Function.convertToStateCombinator(functionCallExpr);
+                type = defineExpr.type;
         }
-        MVColumnItem mvColumnItem = new MVColumnItem(mvColumnName, type, mvAggregateType, false, defineExpr, baseColumnName);
-        return mvColumnItem;
+        if (mvAggregateType == null) {
+            mvAggregateType = AggregateType.valueOf(functionName.toUpperCase());
+        }
+
+        if (!isReplay && defineExpr.hasAggregateSlot()) {
+            SlotRef slot = null;
+            if (defineExpr instanceof SlotRef) {
+                slot = (SlotRef) defineExpr;
+            } else if (defineExpr instanceof CastExpr && defineExpr.getChild(0) instanceof SlotRef) {
+                slot = (SlotRef) defineExpr.getChild(0);
+            } else {
+                throw new AnalysisException(
+                        "Aggregate function require single slot argument, invalid argument is: " + defineExpr.toSql());
+            }
+
+            AggregateType input = slot.getColumn().getAggregationType();
+            if (!input.equals(mvAggregateType)) {
+                throw new AnalysisException("Aggregate function require same with slot aggregate type, input: "
+                        + input.name() + ", required: " + mvAggregateType.name());
+            }
+        }
+        return new MVColumnItem(type, mvAggregateType, defineExpr, mvColumnBuilder(defineExpr.toSql()));
     }
 
-    public Map<String, Expr> parseDefineExprWithoutAnalyze() throws AnalysisException {
+    public Map<String, Expr> parseDefineExpr(Analyzer analyzer) throws AnalysisException {
         Map<String, Expr> result = Maps.newHashMap();
         SelectList selectList = selectStmt.getSelectList();
         for (SelectListItem selectListItem : selectList.getItems()) {
             Expr selectListItemExpr = selectListItem.getExpr();
-            if (selectListItemExpr instanceof SlotRef) {
-                SlotRef slotRef = (SlotRef) selectListItemExpr;
-                result.put(slotRef.getColumnName(), null);
-            } else if (selectListItemExpr instanceof FunctionCallExpr) {
+            Expr expr = selectListItemExpr;
+            String name = mvColumnBuilder(MaterializedIndexMeta.normalizeName(expr.toSql()));
+            if (selectListItemExpr instanceof FunctionCallExpr) {
                 FunctionCallExpr functionCallExpr = (FunctionCallExpr) selectListItemExpr;
-                List<SlotRef> slots = new ArrayList<>();
-                functionCallExpr.collect(SlotRef.class, slots);
-                Preconditions.checkArgument(slots.size() == 1);
-                String baseColumnName = slots.get(0).getColumnName();
-                String functionName = functionCallExpr.getFnName().getFunction();
-                SlotRef baseSlotRef = slots.get(0);
-                switch (functionName.toLowerCase()) {
+                switch (functionCallExpr.getFnName().getFunction().toLowerCase()) {
                     case "sum":
                     case "min":
                     case "max":
-                        result.put(baseColumnName, null);
-                        break;
                     case FunctionSet.BITMAP_UNION:
-                        if (functionCallExpr.getChild(0) instanceof FunctionCallExpr) {
-                            CastExpr castExpr = new CastExpr(new TypeDef(Type.VARCHAR), baseSlotRef);
-                            List<Expr> params = Lists.newArrayList();
-                            params.add(castExpr);
-                            FunctionCallExpr defineExpr = new FunctionCallExpr(FunctionSet.TO_BITMAP, params);
-                            result.put(mvColumnBuilder(functionName, baseColumnName), defineExpr);
-                        } else {
-                            result.put(baseColumnName, null);
-                        }
-                        break;
                     case FunctionSet.HLL_UNION:
-                        if (functionCallExpr.getChild(0) instanceof FunctionCallExpr) {
-                            CastExpr castExpr = new CastExpr(new TypeDef(Type.VARCHAR), baseSlotRef);
-                            List<Expr> params = Lists.newArrayList();
-                            params.add(castExpr);
-                            FunctionCallExpr defineExpr = new FunctionCallExpr(FunctionSet.HLL_HASH, params);
-                            result.put(mvColumnBuilder(functionName, baseColumnName), defineExpr);
-                        } else {
-                            result.put(baseColumnName, null);
-                        }
-                        break;
                     case FunctionSet.COUNT:
-                        Expr defineExpr = new CaseExpr(null, Lists.newArrayList(
-                                new CaseWhenClause(new IsNullPredicate(slots.get(0), false),
-                                                   new IntLiteral(0, Type.BIGINT))), new IntLiteral(1, Type.BIGINT));
-                        result.put(mvColumnBuilder(functionName, baseColumnName), defineExpr);
+                        MVColumnItem item = buildMVColumnItem(analyzer, functionCallExpr);
+                        expr = item.getDefineExpr();
+                        name = item.getName();
                         break;
                     default:
-                        throw new AnalysisException("Unsupported function:" + functionName);
+                        if (Env.getCurrentEnv()
+                                .isAggFunctionName(functionCallExpr.getFnName().getFunction().toLowerCase())) {
+                            MVColumnItem genericItem = buildMVColumnItem(analyzer, functionCallExpr);
+                            expr = genericItem.getDefineExpr();
+                            name = genericItem.getName();
+                        }
+                        break;
                 }
-            } else {
-                throw new AnalysisException("Unsupported select item:" + selectListItem.toSql());
             }
+            result.put(name, expr);
         }
         return result;
+    }
+
+    // for bitmap_union(to_bitmap(column)) function, we should check value is not
+    // negative
+    // in vectorized schema_change mode, so we should rewrite the function to
+    // bitmap_union(to_bitmap_with_check(column))
+    public void rewriteToBitmapWithCheck() {
+        for (SelectListItem item : selectStmt.getSelectList().getItems()) {
+            if (item.getExpr() instanceof FunctionCallExpr) {
+                String functionName = ((FunctionCallExpr) item.getExpr()).getFnName().getFunction();
+                if (functionName.equalsIgnoreCase("bitmap_union")) {
+                    if (item.getExpr().getChildren().size() == 1
+                            && item.getExpr().getChild(0) instanceof FunctionCallExpr) {
+                        FunctionCallExpr childFunctionCallExpr = (FunctionCallExpr) item.getExpr().getChild(0);
+                        if (childFunctionCallExpr.getFnName().getFunction().equalsIgnoreCase("to_bitmap")) {
+                            childFunctionCallExpr.setFnName(FunctionName.createBuiltinName("to_bitmap_with_check"));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public static String mvColumnBuilder(String functionName, String sourceColumnName) {
@@ -477,8 +662,79 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 .append(sourceColumnName).toString();
     }
 
+    public static String mvColumnBuilder(AggregateType aggregateType, String sourceColumnName) {
+        return new StringBuilder().append(MATERIALIZED_VIEW_AGGREGATE_NAME_PREFIX).append(aggregateType.toSql())
+                .append("__")
+                .append(mvColumnBreaker(sourceColumnName)).toString();
+    }
+
+    public static String mvAggregateColumnBuilder(String functionName, String sourceColumnName) {
+        return new StringBuilder().append(MATERIALIZED_VIEW_AGGREGATE_NAME_PREFIX).append(functionName.toUpperCase())
+                .append(MATERIALIZED_VIEW_AGGREGATE_NAME_LINK)
+                .append(sourceColumnName).toString();
+    }
+
+    public static String mvColumnBuilder(String name) {
+        return new StringBuilder().append(MATERIALIZED_VIEW_NAME_PREFIX).append(name).toString();
+    }
+
+    public static String mvColumnBuilder(Optional<String> functionName, String sourceColumnName) {
+        return functionName.map(s -> mvAggregateColumnBuilder(s, sourceColumnName))
+                .orElseGet(() -> mvColumnBuilder(sourceColumnName));
+    }
+
+    public static String mvColumnBreaker(String name) {
+        if (name.startsWith(MATERIALIZED_VIEW_AGGREGATE_NAME_PREFIX)) {
+            // mva_SUM__`k2` -> `k2`;
+            return mvColumnBreaker(name.substring(name.indexOf(MATERIALIZED_VIEW_AGGREGATE_NAME_LINK)
+                    + MATERIALIZED_VIEW_AGGREGATE_NAME_LINK.length()));
+        } else if (name.startsWith(MATERIALIZED_VIEW_NAME_PREFIX)) {
+            // mv_k2 -> k2
+            return mvColumnBreaker(name.substring(MATERIALIZED_VIEW_NAME_PREFIX.length()));
+        }
+        return name;
+    }
+
+    public static String oldmvColumnBreaker(String name) {
+        if (name.startsWith(MATERIALIZED_VIEW_NAME_PREFIX)) {
+            // mv_count_k2 -> k2
+            name = name.substring(MATERIALIZED_VIEW_NAME_PREFIX.length());
+            for (String prefix : FN_NAME_TO_PATTERN.keySet()) {
+                if (name.startsWith(prefix)) {
+                    return name.substring(prefix.length() + 1);
+                }
+            }
+        }
+        if (name.startsWith(MATERIALIZED_VIEW_NAME_PREFIX)) {
+            // mv_k2 -> k2
+            return mvColumnBreaker(name.substring(MATERIALIZED_VIEW_NAME_PREFIX.length()));
+        }
+        return name;
+    }
+
+    private static boolean mvMatch(String name, String prefix) {
+        return MaterializedIndexMeta.normalizeName(name).startsWith(prefix);
+    }
+
+    public static boolean isMVColumn(String name) {
+        return isMVColumnAggregate(name) || isMVColumnNormal(name);
+    }
+
+    public static boolean isMVColumnAggregate(String name) {
+        return mvMatch(name, MATERIALIZED_VIEW_AGGREGATE_NAME_PREFIX);
+    }
+
+    public static boolean isMVColumnNormal(String name) {
+        return mvMatch(name, MATERIALIZED_VIEW_NAME_PREFIX);
+    }
+
     @Override
     public String toSql() {
         return null;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

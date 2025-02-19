@@ -18,9 +18,9 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.datasource.InternalCatalog;
 
 import com.google.common.collect.Lists;
-
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -35,17 +35,30 @@ public class CreateIndexClauseTest {
 
     @Test
     public void testNormal() throws AnalysisException {
-        CreateIndexClause clause = new CreateIndexClause(new TableName("db", "table"), new IndexDef("index1",
-                Lists.newArrayList("col1"), IndexDef.IndexType.BITMAP, "balabala"), false);
+        CreateIndexClause clause = new CreateIndexClause(
+                new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, "db", "table"),
+                new IndexDef("index1", false, Lists.newArrayList("col1"), IndexDef.IndexType.INVERTED, null, "balabala"),
+                false);
         clause.analyze(analyzer);
-        Assert.assertEquals("CREATE INDEX index1 ON `db`.`table` (`col1`) USING BITMAP COMMENT 'balabala'",
+        Assert.assertEquals("CREATE INDEX `index1` ON `db`.`table` (`col1`) USING INVERTED COMMENT 'balabala'",
                 clause.toSql());
 
     }
 
+    @Test
+    public void testAlter() throws AnalysisException {
+        CreateIndexClause clause = new CreateIndexClause(
+                new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, "db", "table"),
+                new IndexDef("index1", false, Lists.newArrayList("col1"), IndexDef.IndexType.INVERTED, null, "balabala"),
+                true);
+        clause.analyze(analyzer);
+        Assert.assertEquals("ADD INDEX `index1` (`col1`) USING INVERTED COMMENT 'balabala'", clause.toSql());
+    }
+
     @Test(expected = AnalysisException.class)
     public void testDuplIndex() throws AnalysisException {
-        CreateIndexClause clause = new CreateIndexClause(new TableName("db", "table"), null, false);
+        CreateIndexClause clause = new CreateIndexClause(
+                new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, "db", "table"), null, false);
         clause.analyze(analyzer);
 
     }

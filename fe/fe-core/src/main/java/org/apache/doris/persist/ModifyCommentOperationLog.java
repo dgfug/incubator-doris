@@ -47,7 +47,8 @@ public class ModifyCommentOperationLog implements Writable {
     @SerializedName(value = "tblComment")
     private String tblComment;
 
-    private ModifyCommentOperationLog(Type type, long dbId, long tblId, Map<String, String> colToComment, String tblComment) {
+    private ModifyCommentOperationLog(Type type, long dbId, long tblId,
+            Map<String, String> colToComment, String tblComment) {
         this.type = type;
         this.dbId = dbId;
         this.tblId = tblId;
@@ -92,5 +93,9 @@ public class ModifyCommentOperationLog implements Writable {
     public static ModifyCommentOperationLog read(DataInput in) throws IOException {
         String json = Text.readString(in);
         return GsonUtils.GSON.fromJson(json, ModifyCommentOperationLog.class);
+    }
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
     }
 }

@@ -19,23 +19,22 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
-
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
 
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mocked;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
 
 public class CreateUserStmtTest {
 
     @Before
     public void setUp() {
-        ConnectContext ctx = new ConnectContext(null);
+        ConnectContext ctx = new ConnectContext();
         ctx.setQualifiedUser("root");
         ctx.setRemoteIP("192.168.1.1");
         UserIdentity currentUserIdentity = new UserIdentity("root", "192.168.1.1");
@@ -46,14 +45,11 @@ public class CreateUserStmtTest {
 
     @Test
     public void testToString(@Injectable Analyzer analyzer,
-                             @Mocked PaloAuth paloAuth) throws UserException, AnalysisException {
+            @Mocked AccessControllerManager accessManager) throws UserException {
 
         new Expectations() {
             {
-                analyzer.getClusterName();
-                result = "testCluster";
-                paloAuth.checkHasPriv((ConnectContext) any, PrivPredicate.GRANT, PaloAuth.PrivLevel.GLOBAL, PaloAuth
-                        .PrivLevel.DATABASE);
+                accessManager.checkGlobalPriv((ConnectContext) any, PrivPredicate.GRANT);
                 result = true;
             }
         };
@@ -61,33 +57,27 @@ public class CreateUserStmtTest {
         CreateUserStmt stmt = new CreateUserStmt(new UserDesc(new UserIdentity("user", "%"), "passwd", true));
         stmt.analyze(analyzer);
 
-        Assert.assertEquals("CREATE USER 'testCluster:user'@'%' IDENTIFIED BY '*XXX'", stmt.toString());
+        Assert.assertEquals("CREATE USER 'user'@'%' IDENTIFIED BY '*XXX'", stmt.toString());
         Assert.assertEquals(new String(stmt.getPassword()), "*59C70DA2F3E3A5BDF46B68F5C8B8F25762BCCEF0");
 
         stmt = new CreateUserStmt(
                 new UserDesc(new UserIdentity("user", "%"), "*59c70da2f3e3a5bdf46b68f5c8b8f25762bccef0", false));
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:user", stmt.getUserIdent().getQualifiedUser());
+        Assert.assertEquals("user", stmt.getUserIdent().getQualifiedUser());
 
-        Assert.assertEquals("CREATE USER 'testCluster:user'@'%' IDENTIFIED BY PASSWORD '*59c70da2f3e3a5bdf46b68f5c8b8f25762bccef0'",
+        Assert.assertEquals("CREATE USER 'user'@'%' IDENTIFIED BY PASSWORD '*59c70da2f3e3a5bdf46b68f5c8b8f25762bccef0'",
                 stmt.toString());
         Assert.assertEquals(new String(stmt.getPassword()), "*59C70DA2F3E3A5BDF46B68F5C8B8F25762BCCEF0");
 
         stmt = new CreateUserStmt(new UserDesc(new UserIdentity("user", "%"), "", false));
         stmt.analyze(analyzer);
 
-        Assert.assertEquals("CREATE USER 'testCluster:user'@'%'", stmt.toString());
+        Assert.assertEquals("CREATE USER 'user'@'%'", stmt.toString());
         Assert.assertEquals(new String(stmt.getPassword()), "");
     }
 
     @Test(expected = AnalysisException.class)
     public void testEmptyUser(@Injectable Analyzer analyzer) throws UserException, AnalysisException {
-        new Expectations() {
-            {
-                analyzer.getClusterName();
-                result = "testCluster";
-            }
-        };
         CreateUserStmt stmt = new CreateUserStmt(new UserDesc(new UserIdentity("", "%"), "passwd", true));
         stmt.analyze(analyzer);
         Assert.fail("No exception throws.");
@@ -95,12 +85,6 @@ public class CreateUserStmtTest {
 
     @Test(expected = AnalysisException.class)
     public void testBadPass(@Injectable Analyzer analyzer) throws UserException, AnalysisException {
-        new Expectations() {
-            {
-                analyzer.getClusterName();
-                result = "testCluster";
-            }
-        };
         CreateUserStmt stmt = new CreateUserStmt(new UserDesc(new UserIdentity("", "%"), "passwd", false));
         stmt.analyze(analyzer);
         Assert.fail("No exception throws.");

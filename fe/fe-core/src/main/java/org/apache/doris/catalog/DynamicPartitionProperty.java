@@ -26,8 +26,14 @@ import org.apache.doris.common.util.DynamicPartitionUtil.StartOfDate;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.common.util.TimeUtils;
 
+import com.google.common.base.Strings;
+
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
+import java.util.function.BiConsumer;
 
 public class DynamicPartitionProperty {
     public static final String DYNAMIC_PARTITION_PROPERTY_PREFIX = "dynamic_partition.";
@@ -46,6 +52,13 @@ public class DynamicPartitionProperty {
     public static final String HISTORY_PARTITION_NUM = "dynamic_partition.history_partition_num";
     public static final String HOT_PARTITION_NUM = "dynamic_partition.hot_partition_num";
     public static final String RESERVED_HISTORY_PERIODS = "dynamic_partition.reserved_history_periods";
+    public static final String STORAGE_POLICY = "dynamic_partition.storage_policy";
+    public static final String STORAGE_MEDIUM = "dynamic_partition.storage_medium";
+
+    public static final Set<String> DYNAMIC_PARTITION_PROPERTIES = new HashSet<>(
+            Arrays.asList(TIME_UNIT, START, END, PREFIX, BUCKETS, ENABLE, START_DAY_OF_WEEK, START_DAY_OF_MONTH,
+                    TIME_ZONE, REPLICATION_NUM, REPLICATION_ALLOCATION, CREATE_HISTORY_PARTITION, HISTORY_PARTITION_NUM,
+                    HOT_PARTITION_NUM, RESERVED_HISTORY_PERIODS, STORAGE_POLICY, STORAGE_MEDIUM));
 
     public static final int MIN_START_OFFSET = Integer.MIN_VALUE;
     public static final int MAX_END_OFFSET = Integer.MAX_VALUE;
@@ -72,6 +85,8 @@ public class DynamicPartitionProperty {
     // If not set, default is 0
     private int hotPartitionNum;
     private String reservedHistoryPeriods;
+    private String storagePolicy;
+    private String storageMedium; // ssd or hdd
 
     public DynamicPartitionProperty(Map<String, String> properties) {
         if (properties != null && !properties.isEmpty()) {
@@ -86,13 +101,21 @@ public class DynamicPartitionProperty {
             this.buckets = Integer.parseInt(properties.get(BUCKETS));
             this.replicaAlloc = analyzeReplicaAllocation(properties);
             this.createHistoryPartition = Boolean.parseBoolean(properties.get(CREATE_HISTORY_PARTITION));
-            this.historyPartitionNum = Integer.parseInt(properties.getOrDefault(HISTORY_PARTITION_NUM, String.valueOf(NOT_SET_HISTORY_PARTITION_NUM)));
+            this.historyPartitionNum = Integer.parseInt(properties.getOrDefault(
+                    HISTORY_PARTITION_NUM, String.valueOf(NOT_SET_HISTORY_PARTITION_NUM)));
             this.hotPartitionNum = Integer.parseInt(properties.getOrDefault(HOT_PARTITION_NUM, "0"));
-            this.reservedHistoryPeriods = properties.getOrDefault(RESERVED_HISTORY_PERIODS, NOT_SET_RESERVED_HISTORY_PERIODS);
+            this.reservedHistoryPeriods = properties.getOrDefault(
+                    RESERVED_HISTORY_PERIODS, NOT_SET_RESERVED_HISTORY_PERIODS);
+            this.storagePolicy = properties.getOrDefault(STORAGE_POLICY, "");
+            this.storageMedium = properties.getOrDefault(STORAGE_MEDIUM, "");
             createStartOfs(properties);
         } else {
             this.exist = false;
         }
+    }
+
+    protected boolean supportProperty(String property) {
+        return true;
     }
 
     private ReplicaAllocation analyzeReplicaAllocation(Map<String, String> properties) {
@@ -168,6 +191,14 @@ public class DynamicPartitionProperty {
         return hotPartitionNum;
     }
 
+    public String getStoragePolicy() {
+        return storagePolicy;
+    }
+
+    public String getStorageMedium() {
+        return storageMedium;
+    }
+
     public String getStartOfInfo() {
         if (getTimeUnit().equalsIgnoreCase(TimeUnit.WEEK.toString())) {
             return startOfWeek.toDisplayInfo();
@@ -199,23 +230,35 @@ public class DynamicPartitionProperty {
      */
     public String getProperties(ReplicaAllocation tableReplicaAlloc) {
         ReplicaAllocation tmpAlloc = this.replicaAlloc.isNotSet() ? tableReplicaAlloc : this.replicaAlloc;
-        String res = ",\n\"" + ENABLE + "\" = \"" + enable + "\"" +
-                ",\n\"" + TIME_UNIT + "\" = \"" + timeUnit + "\"" +
-                ",\n\"" + TIME_ZONE + "\" = \"" + tz.getID() + "\"" +
-                ",\n\"" + START + "\" = \"" + start + "\"" +
-                ",\n\"" + END + "\" = \"" + end + "\"" +
-                ",\n\"" + PREFIX + "\" = \"" + prefix + "\"" +
-                ",\n\"" + REPLICATION_ALLOCATION + "\" = \"" + tmpAlloc.toCreateStmt() + "\"" +
-                ",\n\"" + BUCKETS + "\" = \"" + buckets + "\"" +
-                ",\n\"" + CREATE_HISTORY_PARTITION + "\" = \"" + createHistoryPartition + "\"" +
-                ",\n\"" + HISTORY_PARTITION_NUM + "\" = \"" + historyPartitionNum + "\"" +
-                ",\n\"" + HOT_PARTITION_NUM + "\" = \"" + hotPartitionNum + "\"" +
-                ",\n\"" + RESERVED_HISTORY_PERIODS + "\" = \"" + reservedHistoryPeriods + "\"";
-        if (getTimeUnit().equalsIgnoreCase(TimeUnit.WEEK.toString())) {
-            res += ",\n\"" + START_DAY_OF_WEEK + "\" = \"" + startOfWeek.dayOfWeek + "\"";
-        } else if (getTimeUnit().equalsIgnoreCase(TimeUnit.MONTH.toString())) {
-            res += ",\n\"" + START_DAY_OF_MONTH + "\" = \"" + startOfMonth.day + "\"";
+        StringBuilder sb = new StringBuilder();
+        BiConsumer<String, Object> addProperty = (property, value) -> {
+            if (supportProperty(property)) {
+                sb.append(",\n\"" + property + "\" = \"" + value + "\"");
+            }
+        };
+        addProperty.accept(ENABLE, enable);
+        addProperty.accept(TIME_UNIT, timeUnit);
+        addProperty.accept(TIME_ZONE, tz.getID());
+        addProperty.accept(START, start);
+        addProperty.accept(END, end);
+        addProperty.accept(PREFIX, prefix);
+        addProperty.accept(REPLICATION_ALLOCATION, tmpAlloc.toCreateStmt());
+        addProperty.accept(BUCKETS, buckets);
+        addProperty.accept(CREATE_HISTORY_PARTITION, createHistoryPartition);
+        addProperty.accept(HISTORY_PARTITION_NUM, historyPartitionNum);
+        addProperty.accept(HOT_PARTITION_NUM, hotPartitionNum);
+        addProperty.accept(RESERVED_HISTORY_PERIODS, reservedHistoryPeriods);
+        addProperty.accept(STORAGE_POLICY, storagePolicy);
+        if (!Strings.isNullOrEmpty(storageMedium)) {
+            addProperty.accept(STORAGE_MEDIUM, storageMedium);
         }
-        return res;
+        if (getTimeUnit().equalsIgnoreCase(TimeUnit.WEEK.toString())) {
+            addProperty.accept(START_DAY_OF_WEEK, startOfWeek.dayOfWeek);
+        } else if (getTimeUnit().equalsIgnoreCase(TimeUnit.MONTH.toString())) {
+            addProperty.accept(START_DAY_OF_MONTH, startOfMonth.day);
+        }
+
+        return sb.toString();
     }
+
 }

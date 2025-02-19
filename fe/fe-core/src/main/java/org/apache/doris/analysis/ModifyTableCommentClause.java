@@ -20,11 +20,10 @@ package org.apache.doris.analysis;
 import org.apache.doris.alter.AlterOpType;
 import org.apache.doris.common.AnalysisException;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Map;
 
@@ -49,6 +48,16 @@ public class ModifyTableCommentClause extends AlterTableClause {
     @Override
     public Map<String, String> getProperties() {
         return Maps.newHashMap();
+    }
+
+    @Override
+    public boolean allowOpMTMV() {
+        return true;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return false;
     }
 
     @Override

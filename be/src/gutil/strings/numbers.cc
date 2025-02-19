@@ -14,17 +14,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <inttypes.h>
+#include <sys/types.h>
 #include <limits>
+#include <ostream>
+
+#include "common/exception.h"
+
 using std::numeric_limits;
 #include <string>
+
 using std::string;
 
-#include <common/logging.h>
+#include <fmt/compile.h>
 #include <fmt/format.h>
 
+#include "common/logging.h"
+
 #include "gutil/gscoped_ptr.h"
-#include "gutil/int128.h"
 #include "gutil/integral_types.h"
 #include "gutil/stringprintf.h"
 #include "gutil/strings/ascii_ctype.h"
@@ -450,27 +457,18 @@ bool ParseLeadingBoolValue(const char* str, bool deflt) {
 }
 
 // ----------------------------------------------------------------------
-// FpToString()
+// Uint64ToString()
 // FloatToString()
 // IntToString()
 //    Convert various types to their string representation, possibly padded
 //    with spaces, using snprintf format specifiers.
 // ----------------------------------------------------------------------
 
-string FpToString(Fprint fp) {
+string Uint64ToString(uint64 fp) {
     char buf[17];
     snprintf(buf, sizeof(buf), "%016" PRIx64, fp);
     return string(buf);
 }
-
-// Default arguments
-string Uint128ToHexString(uint128 ui128) {
-    char buf[33];
-    snprintf(buf, sizeof(buf), "%016" PRIx64, Uint128High64(ui128));
-    snprintf(buf + 16, sizeof(buf) - 16, "%016" PRIx64, Uint128Low64(ui128));
-    return string(buf);
-}
-
 namespace {
 
 // Represents integer values of digits.
@@ -776,8 +774,8 @@ uint64 atoi_kmgt(const char* s) {
             scale = GG_ULONGLONG(1) << 40;
             break;
         default:
-            LOG(FATAL) << "Invalid mnemonic: `" << c << "';"
-                       << " should be one of `K', `M', `G', and `T'.";
+            throw doris::Exception(doris::Status::FatalError(
+                    "Invalid mnemonic: `{}'; should be one of `K', `M', `G', and `T'.", c));
         }
     }
     return n * scale;
@@ -1271,24 +1269,14 @@ int FloatToBuffer(float value, int width, char* buffer) {
 }
 
 int FastDoubleToBuffer(double value, char* buffer) {
-    auto end = fmt::format_to(buffer, "{:.15g}", value);
+    auto end = fmt::format_to(buffer, FMT_COMPILE("{}"), value);
     *end = '\0';
-    if (strtod(buffer, nullptr) != value) {
-        end = fmt::format_to(buffer, "{:.17g}", value);
-    }
     return end - buffer;
 }
 
 int FastFloatToBuffer(float value, char* buffer) {
-    auto end = fmt::format_to(buffer, "{:.6g}", value);
+    auto* end = fmt::format_to(buffer, FMT_COMPILE("{}"), value);
     *end = '\0';
-#ifdef _MSC_VER // has no strtof()
-    if (strtod(buffer, nullptr) != value) {
-#else
-    if (strtof(buffer, nullptr) != value) {
-#endif
-        end = fmt::format_to(buffer, "{:.8g}", value);
-    }
     return end - buffer;
 }
 
@@ -1442,7 +1430,6 @@ char* SimpleItoaWithCommas(__int128_t i, char* buffer, int32_t buffer_size) {
     return p;
 }
 
-
 // ----------------------------------------------------------------------
 // ItoaKMGT()
 //    Description: converts an integer to a string
@@ -1477,6 +1464,49 @@ string ItoaKMGT(int64 i) {
     }
 
     return StringPrintf("%s%" PRId64 "%s", sign, val, suffix);
+}
+
+string AccurateItoaKMGT(int64 i) {
+    const char* sign = "";
+    if (i < 0) {
+        // We lose some accuracy if the caller passes LONG_LONG_MIN, but
+        // that's OK as this function is only for human readability
+        if (i == numeric_limits<int64>::min()) i++;
+        sign = "-";
+        i = -i;
+    }
+
+    string ret = StringPrintf("%s", sign);
+    int64 val;
+    if ((val = (i >> 40)) > 1) {
+        ret += StringPrintf("%" PRId64
+                            "%s"
+                            ",",
+                            val, "T");
+        i = i - (val << 40);
+    }
+    if ((val = (i >> 30)) > 1) {
+        ret += StringPrintf("%" PRId64
+                            "%s"
+                            ",",
+                            val, "G");
+        i = i - (val << 30);
+    }
+    if ((val = (i >> 20)) > 1) {
+        ret += StringPrintf("%" PRId64
+                            "%s"
+                            ",",
+                            val, "M");
+        i = i - (val << 20);
+    }
+    if ((val = (i >> 10)) > 1) {
+        ret += StringPrintf("%" PRId64 "%s", val, "K");
+        i = i - (val << 10);
+    } else {
+        ret += StringPrintf("%" PRId64 "%s", i, "K");
+    }
+
+    return ret;
 }
 
 // DEPRECATED(wadetregaskis).

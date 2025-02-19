@@ -9,8 +9,6 @@
 
 #include "util/utf8_check.h"
 
-#include <cstdlib>
-
 #if defined(__i386) || defined(__x86_64__)
 #include "util/simdutf8check.h"
 #elif defined(__aarch64__)
@@ -329,4 +327,11 @@ bool validate_utf8(const char* src, size_t len) {
     return validate_utf8_naive(src, len);
 }
 #endif
+
+bool validate_utf8(const TFileScanRangeParams& params, const char* src, size_t len) {
+    if (params.__isset.file_attributes && !params.file_attributes.enable_text_validate_utf8) {
+        return true;
+    }
+    return validate_utf8(src, len);
+}
 } // namespace doris

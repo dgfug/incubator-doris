@@ -17,7 +17,27 @@
 
 #include "util/uid_util.h"
 
+#include <fmt/compile.h>
+#include <gen_cpp/Types_types.h>
+#include <gen_cpp/types.pb.h>
+#include <glog/logging.h>
+
+#include <cstdlib>
+
+#include "util/hash_util.hpp"
+
 namespace doris {
+
+size_t UniqueId::hash(size_t seed) const {
+    return doris::HashUtil::hash(this, sizeof(*this), seed);
+}
+
+std::size_t hash_value(const doris::TUniqueId& id) {
+    std::size_t seed = 0;
+    HashUtil::hash_combine(seed, id.lo);
+    HashUtil::hash_combine(seed, id.hi);
+    return seed;
+}
 
 std::ostream& operator<<(std::ostream& os, const UniqueId& uid) {
     os << uid.to_string();
@@ -25,32 +45,30 @@ std::ostream& operator<<(std::ostream& os, const UniqueId& uid) {
 }
 
 std::string print_id(const TUniqueId& id) {
-    std::stringstream out;
-    out << std::hex << id.hi << "-" << id.lo;
-    return out.str();
+    return fmt::format(FMT_COMPILE("{:x}-{:x}"), static_cast<uint64_t>(id.hi),
+                       static_cast<uint64_t>(id.lo));
 }
 
 std::string print_id(const PUniqueId& id) {
-    std::stringstream out;
-    out << std::hex << id.hi() << "-" << id.lo();
-    return out.str();
+    return fmt::format(FMT_COMPILE("{:x}-{:x}"), static_cast<uint64_t>(id.hi()),
+                       static_cast<uint64_t>(id.lo()));
 }
 
 bool parse_id(const std::string& s, TUniqueId* id) {
-    DCHECK(id != NULL);
+    DCHECK(id != nullptr);
 
     const char* hi_part = s.c_str();
     char* colon = const_cast<char*>(strchr(hi_part, '-'));
 
-    if (colon == NULL) {
+    if (colon == nullptr) {
         return false;
     }
 
     const char* lo_part = colon + 1;
     *colon = '\0';
 
-    char* error_hi = NULL;
-    char* error_lo = NULL;
+    char* error_hi = nullptr;
+    char* error_lo = nullptr;
     id->hi = strtoul(hi_part, &error_hi, 16);
     id->lo = strtoul(lo_part, &error_lo, 16);
 

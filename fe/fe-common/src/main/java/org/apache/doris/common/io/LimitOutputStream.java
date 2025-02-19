@@ -40,7 +40,7 @@ public class LimitOutputStream extends OutputStream {
 
     /**
      * A output stream that writes the limited bytes to the given stream.
-     * 
+     *
      * @param out
      *            The stream to be limited
      * @param limitspeed
@@ -52,7 +52,9 @@ public class LimitOutputStream extends OutputStream {
             throw new IOException("OutputStream is null");
         }
         speed = limitspeed;
-        LOG.debug("LimitOutputStream limit speed: {}", speed);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("LimitOutputStream limit speed: {}", speed);
+        }
         this.out = out;
         bytesWriteTotal = 0;
         bstart = false;
@@ -72,39 +74,35 @@ public class LimitOutputStream extends OutputStream {
     public void write(byte[] b, int off, int len) throws IOException {
         long sleepTime = 0;
         long curTime = 0;
-        try {
-            if ((off | len | (off + len) | (b.length - (off + len))) < 0) {
-                throw new IndexOutOfBoundsException();
-            } else if (len == 0) {
-                return;
-            }
+        if ((off | len | (off + len) | (b.length - (off + len))) < 0) {
+            throw new IndexOutOfBoundsException();
+        } else if (len == 0) {
+            return;
+        }
 
-            if (speed > 0 && !bstart) {
-                startTime = System.currentTimeMillis();
-                bstart = true;
-            }
-            long resetTime = System.currentTimeMillis();
-            if (resetTime - startTime > 1000) {
-                bytesWriteTotal = 0;
-                startTime = resetTime;
-            }
-            out.write(b, off, len);
-            if (len >= 0) {
-                bytesWriteTotal += len;
-                if (speed > 0) {
-                    curTime = System.currentTimeMillis();
-                    sleepTime = bytesWriteTotal / speed * 1000
-                            - (curTime - startTime);
-                    if (sleepTime > 0) {
-                        try {
-                            Thread.sleep(sleepTime);
-                        } catch (InterruptedException ie) {
-                            LOG.warn("Thread sleep is interrupted");
-                        }
+        if (speed > 0 && !bstart) {
+            startTime = System.currentTimeMillis();
+            bstart = true;
+        }
+        long resetTime = System.currentTimeMillis();
+        if (resetTime - startTime > 1000) {
+            bytesWriteTotal = 0;
+            startTime = resetTime;
+        }
+        out.write(b, off, len);
+        if (len >= 0) {
+            bytesWriteTotal += len;
+            if (speed > 0) {
+                curTime = System.currentTimeMillis();
+                sleepTime = bytesWriteTotal / speed * 1000 - (curTime - startTime);
+                if (sleepTime > 0) {
+                    try {
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException ie) {
+                        LOG.warn("Thread sleep is interrupted");
                     }
                 }
             }
-        } finally {
         }
     }
 

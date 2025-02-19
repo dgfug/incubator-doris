@@ -20,25 +20,24 @@ package org.apache.doris.analysis;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.FormatOptions;
 import org.apache.doris.common.NotImplementedException;
+import org.apache.doris.common.util.ByteBufferUtil;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TIntLiteral;
 
 import com.google.common.base.Preconditions;
-
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-public class IntLiteral extends LiteralExpr {
-    private static final Logger LOG = LogManager.getLogger(IntLiteral.class);
+public class IntLiteral extends NumericLiteralExpr {
 
     public static final long TINY_INT_MIN = Byte.MIN_VALUE; // -2^7 ~ 2^7 - 1
     public static final long TINY_INT_MAX = Byte.MAX_VALUE;
@@ -49,6 +48,7 @@ public class IntLiteral extends LiteralExpr {
     public static final long BIG_INT_MIN = Long.MIN_VALUE; // -2^63 ~ 2^63 - 1
     public static final long BIG_INT_MAX = Long.MAX_VALUE;
 
+    @SerializedName("v")
     private long value;
 
     /**
@@ -173,6 +173,46 @@ public class IntLiteral extends LiteralExpr {
         return new IntLiteral(value);
     }
 
+    public static IntLiteral createMaxValue(Type type) {
+        long value = 0L;
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                value = TINY_INT_MAX;
+                break;
+            case SMALLINT:
+                value = SMALL_INT_MAX;
+                break;
+            case INT:
+                value = INT_MAX;
+                break;
+            case BIGINT:
+                value = BIG_INT_MAX;
+                break;
+            default:
+                Preconditions.checkState(false);
+        }
+
+        return new IntLiteral(value);
+    }
+
+    @Override
+    protected void analyzeImpl(Analyzer analyzer) throws AnalysisException {
+        //it's so strange, now in write/read function, not write type info
+        if (this.type.getPrimitiveType() == Type.INVALID.getPrimitiveType()) {
+            if (this.value <= TINY_INT_MAX && this.value >= TINY_INT_MIN) {
+                type = Type.TINYINT;
+            } else if (this.value <= SMALL_INT_MAX && this.value >= SMALL_INT_MIN) {
+                type = Type.SMALLINT;
+            } else if (this.value <= INT_MAX && this.value >= INT_MIN) {
+                type = Type.INT;
+            } else if (this.value <= BIG_INT_MAX && this.value >= BIG_INT_MIN) {
+                type = Type.BIGINT;
+            } else {
+                Preconditions.checkState(false, value);
+            }
+        }
+    }
+
     @Override
     public boolean isMinValue() {
         switch (type.getPrimitiveType()) {
@@ -215,20 +255,19 @@ public class IntLiteral extends LiteralExpr {
 
     @Override
     public int compareLiteral(LiteralExpr expr) {
+        if (expr instanceof PlaceHolderExpr) {
+            return this.compareLiteral(((PlaceHolderExpr) expr).getLiteral());
+        }
         if (expr instanceof NullLiteral) {
             return 1;
-        }
-        if (expr instanceof StringLiteral) {
-            return ((StringLiteral) expr).compareLiteral(this);
         }
         if (expr == MaxLiteral.MAX_VALUE) {
             return -1;
         }
-        if (value == expr.getLongValue()) {
-            return 0;
-        } else {
-            return value > expr.getLongValue() ? 1 : -1;
+        if (expr instanceof StringLiteral) {
+            return - ((StringLiteral) expr).compareLiteral(this);
         }
+        return Long.compare(value, expr.getLongValue());
     }
 
     @Override
@@ -243,6 +282,11 @@ public class IntLiteral extends LiteralExpr {
     @Override
     public String getStringValue() {
         return Long.toString(value);
+    }
+
+    @Override
+    public String getStringValueForArray(FormatOptions options) {
+        return options.getNestedStringWrapper() + getStringValue() + options.getNestedStringWrapper();
     }
 
     @Override
@@ -268,38 +312,50 @@ public class IntLiteral extends LiteralExpr {
 
     @Override
     protected Expr uncheckedCastTo(Type targetType) throws AnalysisException {
-        if (!targetType.isNumericType()) {
-            return super.uncheckedCastTo(targetType);
-        }
-        if (targetType.isFixedPointType()) {
-            if (!targetType.isScalarType(PrimitiveType.LARGEINT)) {
-                if (!type.equals(targetType)) {
-                    IntLiteral intLiteral = new IntLiteral(this);
-                    intLiteral.setType(targetType);
-                    return intLiteral;
+        if (targetType.isNumericType()) {
+            if (targetType.isFixedPointType()) {
+                if (!targetType.isScalarType(PrimitiveType.LARGEINT)) {
+                    if (!type.equals(targetType)) {
+                        IntLiteral intLiteral = new IntLiteral(this);
+                        intLiteral.setType(targetType);
+                        return intLiteral;
+                    }
+                    return this;
+                } else {
+                    return new LargeIntLiteral(Long.toString(value));
                 }
-                return this;
-            } else {
-                return new LargeIntLiteral(Long.toString(value));
+            } else if (targetType.isFloatingPointType()) {
+                return new FloatLiteral(new Double(value), targetType);
+            } else if (targetType.isDecimalV2() || targetType.isDecimalV3()) {
+                DecimalLiteral res = new DecimalLiteral(new BigDecimal(value));
+                res.setType(targetType);
+                return res;
             }
-        } else if (targetType.isFloatingPointType()) {
-            return new FloatLiteral(new Double(value), targetType);
-        } else if (targetType.isDecimalV2()) {
-            return new DecimalLiteral(new BigDecimal(value));
+            return this;
+        } else if (targetType.isDateType()) {
+            try {
+                //int like 20200101 can be cast to date(2020,01,01)
+                DateLiteral res = new DateLiteral("" + value, targetType);
+                res.setType(targetType);
+                return res;
+            } catch (AnalysisException e) {
+                if (ConnectContext.get() != null) {
+                    ConnectContext.get().getState().reset();
+                }
+                //invalid date format. leave it to BE to cast it as NULL
+            }
+        } else if (targetType.isStringType()) {
+            StringLiteral res = new StringLiteral("" + value);
+            res.setType(targetType);
+            return res;
         }
-        return this;
+        return super.uncheckedCastTo(targetType);
     }
 
     @Override
     public void swapSign() throws NotImplementedException {
         // swapping sign does not change the type
         value = -value;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeLong(value);
     }
 
     public void readFields(DataInput in) throws IOException {
@@ -316,5 +372,25 @@ public class IntLiteral extends LiteralExpr {
     @Override
     public int hashCode() {
         return 31 * super.hashCode() + Long.hashCode(value);
+    }
+
+    @Override
+    public void setupParamFromBinary(ByteBuffer data, boolean isUnsigned) {
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                value = data.get();
+                break;
+            case SMALLINT:
+                value = !isUnsigned ? data.getChar() : ByteBufferUtil.getUnsignedByte(data);
+                break;
+            case INT:
+                value = !isUnsigned ? data.getInt() : ByteBufferUtil.getUnsignedShort(data);
+                break;
+            case BIGINT:
+                value = !isUnsigned ? data.getLong() : ByteBufferUtil.getUnsignedInt(data);
+                break;
+            default:
+                Preconditions.checkState(false);
+        }
     }
 }

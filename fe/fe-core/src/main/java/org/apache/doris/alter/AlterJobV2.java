@@ -17,28 +17,30 @@
 
 package org.apache.doris.alter;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.OlapTable.OlapTableState;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.persist.gson.GsonUtils;
+import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.task.AgentTask;
 
-import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
+import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /*
  * Version 2 of AlterJob, for replacing the old version of AlterJob.
@@ -47,10 +49,12 @@ import java.util.List;
 public abstract class AlterJobV2 implements Writable {
     private static final Logger LOG = LogManager.getLogger(AlterJobV2.class);
 
+
     public enum JobState {
         PENDING, // Job is created
-        WAITING_TXN, // New replicas are created and Shadow catalog object is visible for incoming txns,
-                     // waiting for previous txns to be finished
+        // CHECKSTYLE OFF
+        WAITING_TXN, // New replicas are created and Shadow catalog object is visible for incoming txns, waiting for previous txns to be finished
+        // CHECKSTYLE ON
         RUNNING, // alter tasks are sent to BE, and waiting for them finished.
         FINISHED, // job is done
         CANCELLED; // job is cancelled(failed or be cancelled by user)
@@ -61,7 +65,9 @@ public abstract class AlterJobV2 implements Writable {
     }
 
     public enum JobType {
-        ROLLUP, SCHEMA_CHANGE
+        // Must not remove it or change the order, because catalog depend on it to traverse the image
+        // and load meta data
+        ROLLUP, SCHEMA_CHANGE, DECOMMISSION_BACKEND
     }
 
     @SerializedName(value = "type")
@@ -86,8 +92,22 @@ public abstract class AlterJobV2 implements Writable {
     protected long finishedTimeMs = -1;
     @SerializedName(value = "timeoutMs")
     protected long timeoutMs = -1;
+    @SerializedName(value = "rawSql")
+    protected String rawSql;
+    @SerializedName(value = "cloudClusterName")
+    protected String cloudClusterName = "";
 
-    public AlterJobV2(long jobId, JobType jobType, long dbId, long tableId, String tableName, long timeoutMs) {
+    // The job will wait all transactions before this txn id finished, then send the schema_change/rollup tasks.
+    @SerializedName(value = "watershedTxnId")
+    protected long watershedTxnId = -1;
+
+    // save failed task after retry three times, tablet -> backends
+    @SerializedName(value = "failedTabletBackends")
+    protected Map<Long, List<Long>> failedTabletBackends = Maps.newHashMap();
+
+    public AlterJobV2(String rawSql, long jobId, JobType jobType, long dbId, long tableId, String tableName,
+                      long timeoutMs) {
+        this.rawSql = rawSql;
         this.jobId = jobId;
         this.type = jobType;
         this.dbId = dbId;
@@ -103,12 +123,32 @@ public abstract class AlterJobV2 implements Writable {
         this.type = type;
     }
 
+    public String getCloudClusterName() {
+        return cloudClusterName;
+    }
+
+    public void setCloudClusterName(final String clusterName) {
+        cloudClusterName = clusterName;
+    }
+
+    protected void sleepSeveralSeconds() {
+        try {
+            Thread.sleep(10000);
+        } catch (InterruptedException ie) {
+            LOG.warn("ignore InterruptedException");
+        }
+    }
+
     public long getJobId() {
         return jobId;
     }
 
     public JobState getJobState() {
         return jobState;
+    }
+
+    public void setJobState(JobState jobState) {
+        this.jobState = jobState;
     }
 
     public JobType getType() {
@@ -127,6 +167,10 @@ public abstract class AlterJobV2 implements Writable {
         return tableName;
     }
 
+    public long getWatershedTxnId() {
+        return watershedTxnId;
+    }
+
     public boolean isTimeout() {
         return System.currentTimeMillis() - createTimeMs > timeoutMs;
     }
@@ -143,12 +187,33 @@ public abstract class AlterJobV2 implements Writable {
         return finishedTimeMs;
     }
 
+    public void setFinishedTimeMs(long finishedTimeMs) {
+        this.finishedTimeMs = finishedTimeMs;
+    }
+
+    public String getRawSql() {
+        return rawSql;
+    }
+
+    // /api/debug_point/add/{name}?value=100
+    protected void stateWait(final String name) {
+        long waitTimeMs = DebugPointUtil.getDebugParamOrDefault(name, 0);
+        if (waitTimeMs > 0) {
+            try {
+                LOG.info("debug point {} wait {} ms", name, waitTimeMs);
+                Thread.sleep(waitTimeMs);
+            } catch (InterruptedException e) {
+                LOG.warn(name, e);
+            }
+        }
+    }
+
     /**
      * The keyword 'synchronized' only protects 2 methods:
      * run() and cancel()
      * Only these 2 methods can be visited by different thread(internal working thread and user connection thread)
      * So using 'synchronized' to make sure only one thread can run the job at one time.
-     * 
+     *
      * lock order:
      *      synchronized
      *      db lock
@@ -159,26 +224,42 @@ public abstract class AlterJobV2 implements Writable {
             return;
         }
 
+        if (!Strings.isNullOrEmpty(cloudClusterName)) {
+            ConnectContext ctx = new ConnectContext();
+            ctx.setThreadLocalInfo();
+            ctx.setCloudCluster(cloudClusterName);
+        }
+
+        // /api/debug_point/add/FE.STOP_ALTER_JOB_RUN
+        if (DebugPointUtil.isEnable("FE.STOP_ALTER_JOB_RUN")) {
+            LOG.info("debug point FE.STOP_ALTER_JOB_RUN, schema change schedule stopped");
+            return;
+        }
+
         try {
             switch (jobState) {
-            case PENDING:
-                runPendingJob();
-                break;
-            case WAITING_TXN:
-                runWaitingTxnJob();
-                break;
-            case RUNNING:
-                runRunningJob();
-                break;
-            default:
-                break;
+                case PENDING:
+                    stateWait("FE.ALTER_JOB_V2_PENDING");
+                    runPendingJob();
+                    break;
+                case WAITING_TXN:
+                    stateWait("FE.ALTER_JOB_V2_WAITING_TXN");
+                    runWaitingTxnJob();
+                    break;
+                case RUNNING:
+                    stateWait("FE.ALTER_JOB_V2_RUNNING");
+                    runRunningJob();
+                    break;
+                default:
+                    break;
             }
-        } catch (AlterCancelException e) {
+        } catch (Exception e) {
+            LOG.error("failed to run alter job {}", jobId, e);
             cancelImpl(e.getMessage());
         }
     }
 
-    public synchronized final boolean cancel(String errMsg) {
+    public final synchronized boolean cancel(String errMsg) {
         return cancelImpl(errMsg);
     }
 
@@ -189,15 +270,15 @@ public abstract class AlterJobV2 implements Writable {
     protected boolean checkTableStable(Database db) throws AlterCancelException {
         OlapTable tbl;
         try {
-            tbl = db.getTableOrMetaException(tableId, Table.TableType.OLAP);
+            tbl = (OlapTable) db.getTableOrMetaException(tableId, Table.TableType.OLAP);
         } catch (MetaNotFoundException e) {
             throw new AlterCancelException(e.getMessage());
         }
 
-        tbl.writeLock();
+        tbl.writeLockOrAlterCancelException();
         try {
-            boolean isStable = tbl.isStable(Catalog.getCurrentSystemInfo(),
-                    Catalog.getCurrentCatalog().getTabletScheduler(), db.getClusterName());
+            boolean isStable = tbl.isStable(Env.getCurrentSystemInfo(),
+                    Env.getCurrentEnv().getTabletScheduler());
 
             if (!isStable) {
                 errMsg = "table is unstable";
@@ -216,7 +297,7 @@ public abstract class AlterJobV2 implements Writable {
         }
     }
 
-    protected abstract void runPendingJob() throws AlterCancelException;
+    protected abstract void runPendingJob() throws Exception;
 
     protected abstract void runWaitingTxnJob() throws AlterCancelException;
 
@@ -226,56 +307,16 @@ public abstract class AlterJobV2 implements Writable {
 
     protected abstract void getInfo(List<List<Comparable>> infos);
 
+    protected void ensureCloudClusterExist(List<AgentTask> tasks) throws AlterCancelException {}
+
     public abstract void replay(AlterJobV2 replayedJob);
 
     public static AlterJobV2 read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_86) {
-            JobType type = JobType.valueOf(Text.readString(in));
-            switch (type) {
-                case ROLLUP:
-                    return RollupJobV2.read(in);
-                case SCHEMA_CHANGE:
-                    return SchemaChangeJobV2.read(in);
-                default:
-                    Preconditions.checkState(false);
-                    return null;
-            }
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, AlterJobV2.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, AlterJobV2.class);
     }
 
-    @Override
-    public void write(DataOutput out) throws IOException {
-        Text.writeString(out, type.name());
-        Text.writeString(out, jobState.name());
-
-        out.writeLong(jobId);
-        out.writeLong(dbId);
-        out.writeLong(tableId);
-        Text.writeString(out, tableName);
-
-        Text.writeString(out, errMsg);
-        out.writeLong(createTimeMs);
-        out.writeLong(finishedTimeMs);
-        out.writeLong(timeoutMs);
-    }
-
-    @Deprecated
-    public void readFields(DataInput in) throws IOException {
-        // read common members as write in AlterJobV2.write().
-        // except 'type' member, which is read in AlterJobV2.read()
-        jobState = JobState.valueOf(Text.readString(in));
-
-        jobId = in.readLong();
-        dbId = in.readLong();
-        tableId = in.readLong();
-        tableName = Text.readString(in);
-
-        errMsg = Text.readString(in);
-        createTimeMs = in.readLong();
-        finishedTimeMs = in.readLong();
-        timeoutMs = in.readLong();
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
     }
 }

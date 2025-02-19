@@ -24,37 +24,69 @@ import com.google.common.base.Strings;
  */
 public class UserException extends Exception {
     private InternalErrorCode errorCode;
+    private ErrorCode mysqlErrorCode;
+
     public UserException(String msg, Throwable cause) {
         super(Strings.nullToEmpty(msg), cause);
         errorCode = InternalErrorCode.INTERNAL_ERR;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
     }
 
     public UserException(Throwable cause) {
         super(cause);
         errorCode = InternalErrorCode.INTERNAL_ERR;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
     }
 
     public UserException(String msg, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
         super(Strings.nullToEmpty(msg), cause, enableSuppression, writableStackTrace);
         errorCode = InternalErrorCode.INTERNAL_ERR;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
     }
 
     public UserException(String msg) {
         super(Strings.nullToEmpty(msg));
         errorCode = InternalErrorCode.INTERNAL_ERR;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
     }
 
     public UserException(InternalErrorCode errCode, String msg) {
         super(Strings.nullToEmpty(msg));
         this.errorCode = errCode;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
+    }
+
+    public UserException(InternalErrorCode errCode, String msg, Throwable cause) {
+        super(Strings.nullToEmpty(msg), cause);
+        this.errorCode = errCode;
+        mysqlErrorCode = ErrorCode.ERR_UNKNOWN_ERROR;
     }
 
     public InternalErrorCode getErrorCode() {
         return errorCode;
     }
 
+    public ErrorCode getMysqlErrorCode() {
+        return mysqlErrorCode;
+    }
+
+    public void setMysqlErrorCode(ErrorCode mysqlErrorCode) {
+        this.mysqlErrorCode = mysqlErrorCode;
+    }
+
     @Override
     public String getMessage() {
-        return errorCode + ", detailMessage = " + super.getMessage();
+        return deleteUselessMsg(errorCode + ", detailMessage = " + super.getMessage());
+    }
+
+    public String getDetailMessage() {
+        return deleteUselessMsg(super.getMessage());
+    }
+
+    protected String deleteUselessMsg(String msg) {
+        if (msg.contains("detailMessage = errCode = 2, ")) {
+            return msg.replace("detailMessage = errCode = 2, ", "");
+        }
+        return msg;
     }
 }

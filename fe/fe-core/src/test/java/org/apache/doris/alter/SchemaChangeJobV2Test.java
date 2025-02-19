@@ -17,8 +17,6 @@
 
 package org.apache.doris.alter;
 
-import static org.junit.Assert.assertEquals;
-
 import org.apache.doris.alter.AlterJobV2.JobState;
 import org.apache.doris.analysis.AccessTestUtil;
 import org.apache.doris.analysis.AddColumnClause;
@@ -31,12 +29,15 @@ import org.apache.doris.analysis.ModifyTablePropertiesClause;
 import org.apache.doris.analysis.TypeDef;
 import org.apache.doris.backup.CatalogMocker;
 import org.apache.doris.catalog.AggregateType;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.CatalogTestUtil;
+import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DistributionInfo;
 import org.apache.doris.catalog.DynamicPartitionProperty;
-import org.apache.doris.catalog.FakeCatalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.FakeEditLog;
+import org.apache.doris.catalog.FakeEnv;
+import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.MaterializedIndex.IndexState;
@@ -48,6 +49,7 @@ import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Tablet;
+import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
@@ -63,9 +65,10 @@ import org.apache.doris.thrift.TTaskType;
 import org.apache.doris.transaction.FakeTransactionIDGenerator;
 import org.apache.doris.transaction.GlobalTransactionMgr;
 
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
-import org.apache.hadoop.yarn.webapp.hamlet.HamletSpec;
+import mockit.Expectations;
+import mockit.Injectable;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
@@ -89,12 +92,12 @@ public class SchemaChangeJobV2Test {
     private static String fileName = "./SchemaChangeV2Test";
 
     private static FakeEditLog fakeEditLog;
-    private static FakeCatalog fakeCatalog;
+    private static FakeEnv fakeEnv;
     private static FakeTransactionIDGenerator fakeTransactionIDGenerator;
     private static GlobalTransactionMgr masterTransMgr;
     private static GlobalTransactionMgr slaveTransMgr;
-    private static Catalog masterCatalog;
-    private static Catalog slaveCatalog;
+    private static Env masterEnv;
+    private static Env slaveEnv;
 
     private static Analyzer analyzer;
     private static ColumnDef newCol = new ColumnDef("add_v", new TypeDef(ScalarType.createType(PrimitiveType.INT)),
@@ -105,21 +108,19 @@ public class SchemaChangeJobV2Test {
     public ExpectedException expectedEx = ExpectedException.none();
 
     @Before
-    public void setUp() throws InstantiationException, IllegalAccessException, IllegalArgumentException,
-            InvocationTargetException, NoSuchMethodException, SecurityException, AnalysisException {
+    public void setUp()
+            throws InstantiationException, IllegalAccessException, IllegalArgumentException, InvocationTargetException,
+            NoSuchMethodException, SecurityException, AnalysisException, DdlException {
+        FakeEnv.setMetaVersion(FeMetaVersion.VERSION_CURRENT);
         fakeEditLog = new FakeEditLog();
-        fakeCatalog = new FakeCatalog();
+        fakeEnv = new FakeEnv();
         fakeTransactionIDGenerator = new FakeTransactionIDGenerator();
-        masterCatalog = CatalogTestUtil.createTestCatalog();
-        slaveCatalog = CatalogTestUtil.createTestCatalog();
-        MetaContext metaContext = new MetaContext();
-        metaContext.setMetaVersion(FeMetaVersion.VERSION_61);
-        metaContext.setThreadLocalInfo();
-
-        masterTransMgr = masterCatalog.getGlobalTransactionMgr();
-        masterTransMgr.setEditLog(masterCatalog.getEditLog());
-        slaveTransMgr = slaveCatalog.getGlobalTransactionMgr();
-        slaveTransMgr.setEditLog(slaveCatalog.getEditLog());
+        masterEnv = CatalogTestUtil.createTestCatalog();
+        slaveEnv = CatalogTestUtil.createTestCatalog();
+        masterTransMgr = (GlobalTransactionMgr) masterEnv.getGlobalTransactionMgr();
+        masterTransMgr.setEditLog(masterEnv.getEditLog());
+        slaveTransMgr = (GlobalTransactionMgr) slaveEnv.getGlobalTransactionMgr();
+        slaveTransMgr.setEditLog(slaveEnv.getEditLog());
         analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
         addColumnClause.analyze(analyzer);
 
@@ -129,15 +130,15 @@ public class SchemaChangeJobV2Test {
 
     @Test
     public void testAddSchemaChange() throws UserException {
-        fakeCatalog = new FakeCatalog();
+        fakeEnv = new FakeEnv();
         fakeEditLog = new FakeEditLog();
-        FakeCatalog.setCatalog(masterCatalog);
-        SchemaChangeHandler schemaChangeHandler = Catalog.getCurrentCatalog().getSchemaChangeHandler();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
         ArrayList<AlterClause> alterClauses = new ArrayList<>();
         alterClauses.add(addColumnClause);
-        Database db = masterCatalog.getDbOrDdlException(CatalogTestUtil.testDbId1);
+        Database db = masterEnv.getInternalCatalog().getDbOrDdlException(CatalogTestUtil.testDbId1);
         OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogTestUtil.testTableId1);
-        schemaChangeHandler.process(alterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(alterClauses, db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         Assert.assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
@@ -146,26 +147,26 @@ public class SchemaChangeJobV2Test {
     // start a schema change, then finished
     @Test
     public void testSchemaChange1() throws Exception {
-        fakeCatalog = new FakeCatalog();
+        fakeEnv = new FakeEnv();
         fakeEditLog = new FakeEditLog();
-        FakeCatalog.setCatalog(masterCatalog);
-        SchemaChangeHandler schemaChangeHandler = Catalog.getCurrentCatalog().getSchemaChangeHandler();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
 
         // add a schema change job
         ArrayList<AlterClause> alterClauses = new ArrayList<>();
         alterClauses.add(addColumnClause);
-        Database db = masterCatalog.getDbOrDdlException(CatalogTestUtil.testDbId1);
+        Database db = masterEnv.getInternalCatalog().getDbOrDdlException(CatalogTestUtil.testDbId1);
         OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogTestUtil.testTableId1);
         Partition testPartition = olapTable.getPartition(CatalogTestUtil.testPartitionId1);
-        schemaChangeHandler.process(alterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(alterClauses,  db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         SchemaChangeJobV2 schemaChangeJob = (SchemaChangeJobV2) alterJobsV2.values().stream().findAny().get();
 
         MaterializedIndex baseIndex = testPartition.getBaseIndex();
-        assertEquals(IndexState.NORMAL, baseIndex.getState());
-        assertEquals(PartitionState.NORMAL, testPartition.getState());
-        assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
+        Assert.assertEquals(IndexState.NORMAL, baseIndex.getState());
+        Assert.assertEquals(PartitionState.NORMAL, testPartition.getState());
+        Assert.assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
 
         Tablet baseTablet = baseIndex.getTablets().get(0);
         List<Replica> replicas = baseTablet.getReplicas();
@@ -173,15 +174,15 @@ public class SchemaChangeJobV2Test {
         Replica replica2 = replicas.get(1);
         Replica replica3 = replicas.get(2);
 
-        assertEquals(CatalogTestUtil.testStartVersion, replica1.getVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica2.getVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica3.getVersion());
-        assertEquals(-1, replica1.getLastFailedVersion());
-        assertEquals(-1, replica2.getLastFailedVersion());
-        assertEquals(-1, replica3.getLastFailedVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica1.getLastSuccessVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica2.getLastSuccessVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica3.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica1.getVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica2.getVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica3.getVersion());
+        Assert.assertEquals(-1, replica1.getLastFailedVersion());
+        Assert.assertEquals(-1, replica2.getLastFailedVersion());
+        Assert.assertEquals(-1, replica3.getLastFailedVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica1.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica2.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica3.getLastSuccessVersion());
 
         // runPendingJob
         schemaChangeHandler.runAfterCatalogReady();
@@ -212,7 +213,7 @@ public class SchemaChangeJobV2Test {
         MaterializedIndex shadowIndex = testPartition.getMaterializedIndices(IndexExtState.SHADOW).get(0);
         for (Tablet shadowTablet : shadowIndex.getTablets()) {
             for (Replica shadowReplica : shadowTablet.getReplicas()) {
-                shadowReplica.updateVersionInfo(testPartition.getVisibleVersion(), testPartition.getVisibleVersionHash(), shadowReplica.getDataSize(), shadowReplica.getRowCount());
+                shadowReplica.updateVersion(testPartition.getVisibleVersion());
             }
         }
 
@@ -222,26 +223,26 @@ public class SchemaChangeJobV2Test {
 
     @Test
     public void testSchemaChangeWhileTabletNotStable() throws Exception {
-        fakeCatalog = new FakeCatalog();
+        fakeEnv = new FakeEnv();
         fakeEditLog = new FakeEditLog();
-        FakeCatalog.setCatalog(masterCatalog);
-        SchemaChangeHandler schemaChangeHandler = Catalog.getCurrentCatalog().getSchemaChangeHandler();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
 
         // add a schema change job
         ArrayList<AlterClause> alterClauses = new ArrayList<>();
         alterClauses.add(addColumnClause);
-        Database db = masterCatalog.getDbOrDdlException(CatalogTestUtil.testDbId1);
+        Database db = masterEnv.getInternalCatalog().getDbOrDdlException(CatalogTestUtil.testDbId1);
         OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogTestUtil.testTableId1);
         Partition testPartition = olapTable.getPartition(CatalogTestUtil.testPartitionId1);
-        schemaChangeHandler.process(alterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(alterClauses,  db, olapTable);
         Map<Long, AlterJobV2> alterJobsV2 = schemaChangeHandler.getAlterJobsV2();
         Assert.assertEquals(1, alterJobsV2.size());
         SchemaChangeJobV2 schemaChangeJob = (SchemaChangeJobV2) alterJobsV2.values().stream().findAny().get();
 
         MaterializedIndex baseIndex = testPartition.getBaseIndex();
-        assertEquals(IndexState.NORMAL, baseIndex.getState());
-        assertEquals(PartitionState.NORMAL, testPartition.getState());
-        assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
+        Assert.assertEquals(IndexState.NORMAL, baseIndex.getState());
+        Assert.assertEquals(PartitionState.NORMAL, testPartition.getState());
+        Assert.assertEquals(OlapTableState.SCHEMA_CHANGE, olapTable.getState());
 
         Tablet baseTablet = baseIndex.getTablets().get(0);
         List<Replica> replicas = baseTablet.getReplicas();
@@ -249,15 +250,15 @@ public class SchemaChangeJobV2Test {
         Replica replica2 = replicas.get(1);
         Replica replica3 = replicas.get(2);
 
-        assertEquals(CatalogTestUtil.testStartVersion, replica1.getVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica2.getVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica3.getVersion());
-        assertEquals(-1, replica1.getLastFailedVersion());
-        assertEquals(-1, replica2.getLastFailedVersion());
-        assertEquals(-1, replica3.getLastFailedVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica1.getLastSuccessVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica2.getLastSuccessVersion());
-        assertEquals(CatalogTestUtil.testStartVersion, replica3.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica1.getVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica2.getVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica3.getVersion());
+        Assert.assertEquals(-1, replica1.getLastFailedVersion());
+        Assert.assertEquals(-1, replica2.getLastFailedVersion());
+        Assert.assertEquals(-1, replica3.getLastFailedVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica1.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica2.getLastSuccessVersion());
+        Assert.assertEquals(CatalogTestUtil.testStartVersion, replica3.getLastSuccessVersion());
 
         // runPendingJob
         replica1.setState(Replica.ReplicaState.DECOMMISSION);
@@ -294,7 +295,7 @@ public class SchemaChangeJobV2Test {
         MaterializedIndex shadowIndex = testPartition.getMaterializedIndices(IndexExtState.SHADOW).get(0);
         for (Tablet shadowTablet : shadowIndex.getTablets()) {
             for (Replica shadowReplica : shadowTablet.getReplicas()) {
-                shadowReplica.updateVersionInfo(testPartition.getVisibleVersion(), testPartition.getVisibleVersionHash(), shadowReplica.getDataSize(), shadowReplica.getRowCount());
+                shadowReplica.updateVersion(testPartition.getVisibleVersion());
             }
         }
 
@@ -304,10 +305,10 @@ public class SchemaChangeJobV2Test {
 
     @Test
     public void testModifyDynamicPartitionNormal() throws UserException {
-        fakeCatalog = new FakeCatalog();
+        fakeEnv = new FakeEnv();
         fakeEditLog = new FakeEditLog();
-        FakeCatalog.setCatalog(masterCatalog);
-        SchemaChangeHandler schemaChangeHandler = Catalog.getCurrentCatalog().getSchemaChangeHandler();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
         ArrayList<AlterClause> alterClauses = new ArrayList<>();
         Map<String, String> properties = new HashMap<>();
         properties.put(DynamicPartitionProperty.ENABLE, "true");
@@ -318,7 +319,7 @@ public class SchemaChangeJobV2Test {
         alterClauses.add(new ModifyTablePropertiesClause(properties));
         Database db = CatalogMocker.mockDb();
         OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogMocker.TEST_TBL2_ID);
-        schemaChangeHandler.process(alterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(alterClauses,  db, olapTable);
         Assert.assertTrue(olapTable.getTableProperty().getDynamicPartitionProperty().isExist());
         Assert.assertTrue(olapTable.getTableProperty().getDynamicPartitionProperty().getEnable());
         Assert.assertEquals("day", olapTable.getTableProperty().getDynamicPartitionProperty().getTimeUnit());
@@ -331,39 +332,39 @@ public class SchemaChangeJobV2Test {
         ArrayList<AlterClause> tmpAlterClauses = new ArrayList<>();
         properties.put(DynamicPartitionProperty.ENABLE, "false");
         tmpAlterClauses.add(new ModifyTablePropertiesClause(properties));
-        schemaChangeHandler.process(tmpAlterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(tmpAlterClauses,  db, olapTable);
         Assert.assertFalse(olapTable.getTableProperty().getDynamicPartitionProperty().getEnable());
         // set dynamic_partition.time_unit = week
         tmpAlterClauses = new ArrayList<>();
         properties.put(DynamicPartitionProperty.TIME_UNIT, "week");
         tmpAlterClauses.add(new ModifyTablePropertiesClause(properties));
-        schemaChangeHandler.process(tmpAlterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(tmpAlterClauses,  db, olapTable);
         Assert.assertEquals("week", olapTable.getTableProperty().getDynamicPartitionProperty().getTimeUnit());
         // set dynamic_partition.end = 10
         tmpAlterClauses = new ArrayList<>();
         properties.put(DynamicPartitionProperty.END, "10");
         tmpAlterClauses.add(new ModifyTablePropertiesClause(properties));
-        schemaChangeHandler.process(tmpAlterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(tmpAlterClauses,  db, olapTable);
         Assert.assertEquals(10, olapTable.getTableProperty().getDynamicPartitionProperty().getEnd());
         // set dynamic_partition.prefix = p1
         tmpAlterClauses = new ArrayList<>();
         properties.put(DynamicPartitionProperty.PREFIX, "p1");
         tmpAlterClauses.add(new ModifyTablePropertiesClause(properties));
-        schemaChangeHandler.process(tmpAlterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(tmpAlterClauses,  db, olapTable);
         Assert.assertEquals("p1", olapTable.getTableProperty().getDynamicPartitionProperty().getPrefix());
         // set dynamic_partition.buckets = 3
         tmpAlterClauses = new ArrayList<>();
         properties.put(DynamicPartitionProperty.BUCKETS, "3");
         tmpAlterClauses.add(new ModifyTablePropertiesClause(properties));
-        schemaChangeHandler.process(tmpAlterClauses, "default_cluster", db, olapTable);
+        schemaChangeHandler.process(tmpAlterClauses,  db, olapTable);
         Assert.assertEquals(3, olapTable.getTableProperty().getDynamicPartitionProperty().getBuckets());
     }
 
-    public void modifyDynamicPartitionWithoutTableProperty(String propertyKey, String propertyValue, String missPropertyKey)
+    public void modifyDynamicPartitionWithoutTableProperty(String propertyKey, String propertyValue)
             throws UserException {
-        fakeCatalog = new FakeCatalog();
-        FakeCatalog.setCatalog(masterCatalog);
-        SchemaChangeHandler schemaChangeHandler = Catalog.getCurrentCatalog().getSchemaChangeHandler();
+        fakeEnv = new FakeEnv();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
         ArrayList<AlterClause> alterClauses = new ArrayList<>();
         Map<String, String> properties = new HashMap<>();
         properties.put(propertyKey, propertyValue);
@@ -373,18 +374,43 @@ public class SchemaChangeJobV2Test {
         OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogMocker.TEST_TBL2_ID);
 
         expectedEx.expect(DdlException.class);
-        expectedEx.expectMessage("errCode = 2, detailMessage = Table test_db.test_tbl2 is not a dynamic partition table. " +
-                "Use command `HELP ALTER TABLE` to see how to change a normal table to a dynamic partition table.");
-        schemaChangeHandler.process(alterClauses, "default_cluster", db, olapTable);
+        expectedEx.expectMessage("errCode = 2,"
+                + " detailMessage = Table test_db.test_tbl2 is not a dynamic partition table. "
+                + "Use command `HELP ALTER TABLE` to see how to change a normal table to a dynamic partition table.");
+        schemaChangeHandler.process(alterClauses,  db, olapTable);
     }
 
     @Test
     public void testModifyDynamicPartitionWithoutTableProperty() throws UserException {
-        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.ENABLE, "false", DynamicPartitionProperty.TIME_UNIT);
-        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.TIME_UNIT, "day", DynamicPartitionProperty.ENABLE);
-        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.END, "3", DynamicPartitionProperty.ENABLE);
-        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.PREFIX, "p", DynamicPartitionProperty.ENABLE);
-        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.BUCKETS, "30", DynamicPartitionProperty.ENABLE);
+        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.ENABLE, "false");
+        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.TIME_UNIT, "day");
+        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.END, "3");
+        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.PREFIX, "p");
+        modifyDynamicPartitionWithoutTableProperty(DynamicPartitionProperty.BUCKETS, "30");
+    }
+
+    @Test
+    public void testModifyDynamicPartitionWithInvalidProperty() throws UserException {
+        fakeEnv = new FakeEnv();
+        fakeEditLog = new FakeEditLog();
+        FakeEnv.setEnv(masterEnv);
+        SchemaChangeHandler schemaChangeHandler = Env.getCurrentEnv().getSchemaChangeHandler();
+        ArrayList<AlterClause> alterClauses = new ArrayList<>();
+        Map<String, String> properties = new HashMap<>();
+        properties.put(DynamicPartitionProperty.ENABLE, "true");
+        properties.put(DynamicPartitionProperty.DYNAMIC_PARTITION_PROPERTY_PREFIX + "time_uint", "day");
+        properties.put(DynamicPartitionProperty.DYNAMIC_PARTITION_PROPERTY_PREFIX + "edn", "3");
+        properties.put(DynamicPartitionProperty.PREFIX, "p");
+        properties.put(DynamicPartitionProperty.BUCKETS, "30");
+        properties.put("invalid_property", "invalid_value");
+        alterClauses.add(new ModifyTablePropertiesClause(properties));
+
+        Database db = CatalogMocker.mockDb();
+        OlapTable olapTable = (OlapTable) db.getTableOrDdlException(CatalogMocker.TEST_TBL2_ID);
+        expectedEx.expect(DdlException.class);
+        expectedEx.expectMessage("errCode = 2,"
+                + " detailMessage = Invalid dynamic partition properties: dynamic_partition.time_uint, dynamic_partition.edn");
+        schemaChangeHandler.process(alterClauses, db, olapTable);
     }
 
     @Test
@@ -392,9 +418,11 @@ public class SchemaChangeJobV2Test {
         // prepare file
         File file = new File(fileName);
         file.createNewFile();
+        file.deleteOnExit();
         DataOutputStream out = new DataOutputStream(new FileOutputStream(file));
 
-        SchemaChangeJobV2 schemaChangeJobV2 = new SchemaChangeJobV2(1, 1,1, "test",600000);
+        SchemaChangeJobV2 schemaChangeJobV2 = AlterJobV2Factory.createSchemaChangeJobV2(
+                "", 1, 1, 1, "test", 600000);
         schemaChangeJobV2.setStorageFormat(TStorageFormat.V2);
         Deencapsulation.setField(schemaChangeJobV2, "jobState", AlterJobV2.JobState.FINISHED);
         Map<Long, SchemaVersionAndHash> indexSchemaVersionAndHashMap = Maps.newHashMap();
@@ -408,7 +436,7 @@ public class SchemaChangeJobV2Test {
 
         // read objects from file
         MetaContext metaContext = new MetaContext();
-        metaContext.setMetaVersion(FeMetaVersion.VERSION_86);
+        metaContext.setMetaVersion(FeMetaVersion.VERSION_CURRENT);
         metaContext.setThreadLocalInfo();
 
         DataInputStream in = new DataInputStream(new FileInputStream(file));
@@ -423,5 +451,78 @@ public class SchemaChangeJobV2Test {
         Map<Long, SchemaVersionAndHash> map = Deencapsulation.getField(result, "indexSchemaVersionAndHashMap");
         Assert.assertEquals(10, map.get(1000L).schemaVersion);
         Assert.assertEquals(20, map.get(1000L).schemaHash);
+    }
+
+    @Test
+    public void testModifyTableDistributionType() throws DdlException {
+        fakeEnv = new FakeEnv();
+        fakeEditLog = new FakeEditLog();
+        FakeEnv.setEnv(masterEnv);
+        Database db = masterEnv.getInternalCatalog().getDb(CatalogTestUtil.testDbId1).get();
+        OlapTable olapTable = (OlapTable) db.getTable(CatalogTestUtil.testTableId1).get();
+        Env.getCurrentEnv().convertDistributionType(db, olapTable);
+        Assert.assertTrue(olapTable.getDefaultDistributionInfo().getType() == DistributionInfo.DistributionInfoType.RANDOM);
+        Partition partition1 = olapTable.getPartition(CatalogTestUtil.testPartitionId1);
+        Assert.assertTrue(partition1.getDistributionInfo().getType() == DistributionInfo.DistributionInfoType.RANDOM);
+    }
+
+    @Test
+    public void testAbnormalModifyTableDistributionType1(@Injectable OlapTable table) throws UserException {
+        fakeEnv = new FakeEnv();
+        fakeEditLog = new FakeEditLog();
+        FakeEnv.setEnv(masterEnv);
+        Database db = masterEnv.getInternalCatalog().getDb(CatalogTestUtil.testDbId1).get();
+        new Expectations() {
+            {
+                table.isColocateTable();
+                result = true;
+            }
+        };
+        expectedEx.expect(DdlException.class);
+        expectedEx.expectMessage("errCode = 2, detailMessage = Cannot change distribution type of colocate table.");
+        Env.getCurrentEnv().convertDistributionType(db, table);
+    }
+
+    @Test
+    public void testAbnormalModifyTableDistributionType2(@Injectable OlapTable table) throws UserException {
+        fakeEnv = new FakeEnv();
+        fakeEditLog = new FakeEditLog();
+        FakeEnv.setEnv(masterEnv);
+        Database db = masterEnv.getInternalCatalog().getDb(CatalogTestUtil.testDbId1).get();
+        new Expectations() {
+            {
+                table.isColocateTable();
+                result = false;
+                table.getKeysType();
+                result = KeysType.UNIQUE_KEYS;
+            }
+        };
+        expectedEx.expect(DdlException.class);
+        expectedEx.expectMessage("errCode = 2, detailMessage = Cannot change distribution type of unique keys table.");
+        Env.getCurrentEnv().convertDistributionType(db, table);
+    }
+
+    @Test
+    public void testAbnormalModifyTableDistributionType3(@Injectable OlapTable table) throws UserException {
+        fakeEnv = new FakeEnv();
+        fakeEditLog = new FakeEditLog();
+        FakeEnv.setEnv(masterEnv);
+        Database db = masterEnv.getInternalCatalog().getDb(CatalogTestUtil.testDbId1).get();
+        new Expectations() {
+            {
+                table.isColocateTable();
+                result = false;
+                table.getKeysType();
+                result = KeysType.AGG_KEYS;
+                table.getBaseSchema();
+                result = Lists.newArrayList(
+                    new Column("k1", Type.INT, true, null, "0", ""),
+                    new Column("v1", Type.INT, false, AggregateType.REPLACE, "0", ""));
+            }
+        };
+        expectedEx.expect(DdlException.class);
+        expectedEx.expectMessage("errCode = 2, detailMessage = Cannot change "
+                + "distribution type of aggregate keys table which has value columns with REPLACE type.");
+        Env.getCurrentEnv().convertDistributionType(db, table);
     }
 }

@@ -17,8 +17,8 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
@@ -28,28 +28,44 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
-public class ShowFrontendsStmt extends ShowStmt {
+import com.google.common.collect.ImmutableList;
+
+public class ShowFrontendsStmt extends ShowStmt implements NotFallbackInParser {
+    private String detail;
 
     public ShowFrontendsStmt() {
     }
 
+    public ShowFrontendsStmt(String detail) {
+        this.detail = detail;
+    }
+
+    public String getDetailType() {
+        return detail;
+    }
+
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)
-                && !Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(),
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)
+                && !Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(),
                                                                           PrivPredicate.OPERATOR)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN/OPERATOR");
+        }
+
+        if (detail != null && !detail.equalsIgnoreCase("disks")) {
+            throw new AnalysisException("Show frontends with extra info only support show frontends disks");
         }
     }
 
     @Override
     public ShowResultSetMetaData getMetaData() {
         ShowResultSetMetaData.Builder builder = ShowResultSetMetaData.builder();
-        for (String title : FrontendsProcNode.TITLE_NAMES) {
-            // hide hostname for SHOW FRONTENDS stmt
-            if (title.equals("HostName")) {
-                continue;
-            }
+
+        ImmutableList<String> titles = FrontendsProcNode.TITLE_NAMES;
+        if (detail != null && detail.equalsIgnoreCase("disks")) {
+            titles = FrontendsProcNode.DISK_TITLE_NAMES;
+        }
+        for (String title : titles) {
             builder.addColumn(new Column(title, ScalarType.createVarchar(30)));
         }
         return builder.build();
@@ -64,4 +80,3 @@ public class ShowFrontendsStmt extends ShowStmt {
         }
     }
 }
-

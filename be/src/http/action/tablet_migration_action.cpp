@@ -17,33 +17,33 @@
 
 #include "http/action/tablet_migration_action.h"
 
+#include <glog/logging.h>
+
+#include <exception>
 #include <string>
 
-#include "gutil/strings/substitute.h"
+#include "common/config.h"
+#include "common/status.h"
 #include "http/http_channel.h"
 #include "http/http_headers.h"
 #include "http/http_request.h"
 #include "http/http_status.h"
+#include "olap/data_dir.h"
 #include "olap/storage_engine.h"
 #include "olap/tablet_manager.h"
 #include "olap/task/engine_storage_migration_task.h"
-#include "util/json_util.h"
 
 namespace doris {
 
 const static std::string HEADER_JSON = "application/json";
 
-TabletMigrationAction::TabletMigrationAction() {
-    _init_migration_action();
-}
-
 void TabletMigrationAction::_init_migration_action() {
     int32_t max_thread_num = config::max_tablet_migration_threads;
     int32_t min_thread_num = config::min_tablet_migration_threads;
-    ThreadPoolBuilder("MigrationTaskThreadPool")
-            .set_min_threads(min_thread_num)
-            .set_max_threads(max_thread_num)
-            .build(&_migration_thread_pool);
+    THROW_IF_ERROR(ThreadPoolBuilder("MigrationTaskThreadPool")
+                           .set_min_threads(min_thread_num)
+                           .set_max_threads(max_thread_num)
+                           .build(&_migration_thread_pool));
 }
 
 void TabletMigrationAction::handle(HttpRequest* req) {
@@ -63,18 +63,19 @@ void TabletMigrationAction::handle(HttpRequest* req) {
                 do {
                     {
                         std::unique_lock<std::mutex> lock(_migration_status_mutex);
-                        std::map<MigrationTask, std::string>::iterator it_task = _migration_tasks.find(current_task);
+                        std::map<MigrationTask, std::string>::iterator it_task =
+                                _migration_tasks.find(current_task);
                         if (it_task != _migration_tasks.end()) {
-                            status = Status::AlreadyExist(strings::Substitute(
+                            status = Status::AlreadyExist(
                                     "There is a migration task for this tablet already exists. "
-                                    "dest_disk is $0 .",
-                                    (it_task->first)._dest_disk));
+                                    "dest_disk is {} .",
+                                    (it_task->first)._dest_disk);
                             break;
                         }
                         _migration_tasks[current_task] = "submitted";
                     }
-                    auto st = _migration_thread_pool->submit_func([&, tablet_id, schema_hash,
-                                                                   dest_disk, current_task]() {
+                    auto st = _migration_thread_pool->submit_func([&, tablet, dest_store,
+                                                                   current_task]() {
                         {
                             std::unique_lock<std::mutex> lock(_migration_status_mutex);
                             _migration_tasks[current_task] = "running";
@@ -88,7 +89,7 @@ void TabletMigrationAction::handle(HttpRequest* req) {
                                 _migration_tasks.erase(it_task);
                             }
                             std::pair<MigrationTask, Status> finished_task =
-                                    make_pair(current_task, result_status);
+                                    std::make_pair(current_task, result_status);
                             if (_finished_migration_tasks.size() >=
                                 config::finished_migration_tasks_size) {
                                 _finished_migration_tasks.pop_front();
@@ -109,7 +110,7 @@ void TabletMigrationAction::handle(HttpRequest* req) {
             }
             std::string status_result;
             if (!status.ok()) {
-                status_result = to_json(status);
+                status_result = status.to_json();
             } else {
                 status_result =
                         "{\"status\": \"Success\", \"msg\": \"migration task is successfully "
@@ -123,7 +124,8 @@ void TabletMigrationAction::handle(HttpRequest* req) {
             std::string status_result;
             do {
                 std::unique_lock<std::mutex> lock(_migration_status_mutex);
-                std::map<MigrationTask, std::string>::iterator it_task = _migration_tasks.find(current_task);
+                std::map<MigrationTask, std::string>::iterator it_task =
+                        _migration_tasks.find(current_task);
                 if (it_task != _migration_tasks.end()) {
                     status_result = "{\"status\": \"Success\", \"msg\": \"migration task is " +
                                     it_task->second + "\", \"dest_disk\": \"" +
@@ -151,13 +153,13 @@ void TabletMigrationAction::handle(HttpRequest* req) {
                 }
             } while (0);
             if (!status.ok()) {
-                status_result = to_json(status);
+                status_result = status.to_json();
             }
             req->add_output_header(HttpHeaders::CONTENT_TYPE, HEADER_JSON.c_str());
             HttpChannel::send_reply(req, HttpStatus::OK, status_result);
         }
     } else {
-        std::string status_result = to_json(status);
+        std::string status_result = status.to_json();
         req->add_output_header(HttpHeaders::CONTENT_TYPE, HEADER_JSON.c_str());
         HttpChannel::send_reply(req, HttpStatus::OK, status_result);
     }
@@ -171,9 +173,9 @@ Status TabletMigrationAction::_check_param(HttpRequest* req, int64_t& tablet_id,
         tablet_id = std::stoull(req_tablet_id);
         schema_hash = std::stoul(req_schema_hash);
     } catch (const std::exception& e) {
-        LOG(WARNING) << "invalid argument.tablet_id:" << req_tablet_id
-                     << ", schema_hash:" << req_schema_hash;
-        return Status::InternalError(strings::Substitute("Convert failed, $0", e.what()));
+        return Status::InternalError(
+                "Convert failed:{}, invalid argument.tablet_id: {}, schema_hash: {}", e.what(),
+                req_tablet_id, req_schema_hash);
     }
     dest_disk = req->param("disk");
     goal = req->param("goal");
@@ -186,14 +188,14 @@ Status TabletMigrationAction::_check_param(HttpRequest* req, int64_t& tablet_id,
 Status TabletMigrationAction::_check_migrate_request(int64_t tablet_id, int32_t schema_hash,
                                                      string dest_disk, TabletSharedPtr& tablet,
                                                      DataDir** dest_store) {
-    tablet = StorageEngine::instance()->tablet_manager()->get_tablet(tablet_id, schema_hash);
+    tablet = _engine.tablet_manager()->get_tablet(tablet_id);
     if (tablet == nullptr) {
-        LOG(WARNING) << "no tablet for tablet_id:" << tablet_id << " schema hash:" << schema_hash;
+        LOG(WARNING) << "no tablet for tablet_id:" << tablet_id;
         return Status::NotFound("Tablet not found");
     }
 
     // request specify the data dir
-    *dest_store = StorageEngine::instance()->get_store(dest_disk);
+    *dest_store = _engine.get_store(dest_disk);
     if (*dest_store == nullptr) {
         LOG(WARNING) << "data dir not found: " << dest_disk;
         return Status::NotFound("Disk not found");
@@ -204,12 +206,14 @@ Status TabletMigrationAction::_check_migrate_request(int64_t tablet_id, int32_t 
         return Status::AlreadyExist("Tablet already exist in destination disk");
     }
 
-    // check disk capacity
-    int64_t tablet_size = tablet->tablet_footprint();
+    // check local disk capacity
+    int64_t tablet_size = tablet->tablet_local_size();
     if ((*dest_store)->reach_capacity_limit(tablet_size)) {
         LOG(WARNING) << "reach the capacity limit of path: " << (*dest_store)->path()
                      << ", tablet size: " << tablet_size;
-        return Status::InternalError("Insufficient disk capacity");
+        return Status::Error<ErrorCode::EXCEEDED_LIMIT>(
+                "reach the capacity limit of path {}, tablet_size={}", (*dest_store)->path(),
+                tablet_size);
     }
 
     return Status::OK();
@@ -220,20 +224,18 @@ Status TabletMigrationAction::_execute_tablet_migration(TabletSharedPtr tablet,
     int64_t tablet_id = tablet->tablet_id();
     int32_t schema_hash = tablet->schema_hash();
     string dest_disk = dest_store->path();
-    EngineStorageMigrationTask engine_task(tablet, dest_store);
-    OLAPStatus res = StorageEngine::instance()->execute_task(&engine_task);
-    Status status = Status::OK();
-    if (res != OLAP_SUCCESS) {
+    EngineStorageMigrationTask engine_task(_engine, tablet, dest_store);
+    SCOPED_ATTACH_TASK(engine_task.mem_tracker());
+    Status res = engine_task.execute();
+    if (!res.ok()) {
         LOG(WARNING) << "tablet migrate failed. tablet_id=" << tablet_id
                      << ", schema_hash=" << schema_hash << ", dest_disk=" << dest_disk
                      << ", status:" << res;
-        status = Status::InternalError(strings::Substitute("migration task failed, res: $0", res));
     } else {
         LOG(INFO) << "tablet migrate success. tablet_id=" << tablet_id
-                  << ", schema_hash=" << schema_hash << ", dest_disk=" << dest_disk
-                  << ", status:" << res;
+                  << ", schema_hash=" << schema_hash << ", dest_disk=" << dest_disk;
     }
-    return status;
+    return res;
 }
 
 } // namespace doris

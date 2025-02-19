@@ -24,10 +24,8 @@
 #include <iostream>
 
 #include "gen_cpp/Descriptors_types.h"
-#include "util/compress.h"
 
 using namespace std;
-using namespace boost;
 
 namespace doris {
 
@@ -49,19 +47,19 @@ protected:
     }
 
     void RunTest(THdfsCompression::type format) {
-        boost::scoped_ptr<Codec> compressor;
-        boost::scoped_ptr<Codec> decompressor;
-        MemPool* mem_pool = new MemPool;
+        std::unique_ptr<Codec> compressor;
+        std::unique_ptr<Codec> decompressor;
+        vectorized::Arena* arena = new vectorized::Arena;
 
-        EXPECT_TRUE(Codec::create_compressor(NULL, mem_pool, true, format, &compressor).ok());
-        EXPECT_TRUE(Codec::create_compressor(NULL, mem_pool, true, format, &decompressor).ok());
+        EXPECT_TRUE(Codec::create_compressor(nullptr, arena, true, format, &compressor).ok());
+        EXPECT_TRUE(Codec::create_compressor(nullptr, arena, true, format, &decompressor).ok());
 
-        uint8_t* compressed = NULL;
+        uint8_t* compressed = nullptr;
         int compressed_length = 0;
         EXPECT_TRUE(
                 compressor->process_block(sizeof(_input), _input, &compressed_length, &compressed)
                         .ok());
-        uint8_t* output = NULL;
+        uint8_t* output = nullptr;
         int out_len = 0;
         EXPECT_TRUE(
                 decompressor->process_block(compressed_length, compressed, &out_len, &output).ok());
@@ -70,7 +68,7 @@ protected:
 
         // Try again specifying the output buffer and length.
         out_len = sizeof(_input);
-        output = mem_pool->allocate(out_len);
+        output = arena->alloc(out_len);
         EXPECT_TRUE(
                 decompressor->process_block(compressed_length, compressed, &out_len, &output).ok());
 
@@ -106,14 +104,3 @@ TEST_F(DecompressorTest, SnappyBlocked) {
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

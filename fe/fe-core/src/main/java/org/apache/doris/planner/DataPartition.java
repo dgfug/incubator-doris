@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/DataPartition.java
+// and modified by Doris
 
 package org.apache.doris.planner;
 
@@ -30,9 +33,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import java.util.List;
 
 /**
@@ -44,51 +44,42 @@ import java.util.List;
  * TODO: better name? just Partitioning?
  */
 public class DataPartition {
-    private static final Logger LOG = LogManager.getLogger(DataPartition.class);
 
     public static final DataPartition UNPARTITIONED = new DataPartition(TPartitionType.UNPARTITIONED);
-
     public static final DataPartition RANDOM = new DataPartition(TPartitionType.RANDOM);
+    public static final DataPartition TABLET_ID = new DataPartition(TPartitionType.OLAP_TABLE_SINK_HASH_PARTITIONED);
 
     private final TPartitionType type;
-
     // for hash partition: exprs used to compute hash value
-    private ImmutableList<Expr> partitionExprs = ImmutableList.of();
-
-    private List<DataSplitSink.EtlRangePartitionInfo> partitions;
+    private ImmutableList<Expr> partitionExprs;
 
     public DataPartition(TPartitionType type, List<Expr> exprs) {
         Preconditions.checkNotNull(exprs);
         Preconditions.checkState(!exprs.isEmpty());
-        Preconditions.checkState(
-          type == TPartitionType.HASH_PARTITIONED || type == TPartitionType.RANGE_PARTITIONED
-                  || type == TPartitionType.BUCKET_SHFFULE_HASH_PARTITIONED);
+        Preconditions.checkState(type == TPartitionType.HASH_PARTITIONED
+                || type == TPartitionType.RANGE_PARTITIONED
+                || type == TPartitionType.HIVE_TABLE_SINK_HASH_PARTITIONED
+                || type == TPartitionType.BUCKET_SHFFULE_HASH_PARTITIONED);
         this.type = type;
         this.partitionExprs = ImmutableList.copyOf(exprs);
     }
 
-    public DataPartition(
-            List<Expr> partitionExprs,
-            List<DataSplitSink.EtlRangePartitionInfo> partitions) {
-        this.type = TPartitionType.RANGE_PARTITIONED;
-        this.partitionExprs = ImmutableList.copyOf(partitionExprs);
-        this.partitions = partitions;
-    }
-
-    public void substitute(ExprSubstitutionMap smap, Analyzer analyzer) throws AnalysisException {
-        List<Expr> list = Expr.trySubstituteList(partitionExprs, smap, analyzer, false);
-        partitionExprs = ImmutableList.copyOf(list);
-    }
-    
     public DataPartition(TPartitionType type) {
-        Preconditions.checkState(
-          type == TPartitionType.UNPARTITIONED || type == TPartitionType.RANDOM);
+        Preconditions.checkState(type == TPartitionType.UNPARTITIONED
+                || type == TPartitionType.RANDOM
+                || type == TPartitionType.HIVE_TABLE_SINK_UNPARTITIONED
+                || type == TPartitionType.OLAP_TABLE_SINK_HASH_PARTITIONED);
         this.type = type;
         this.partitionExprs = ImmutableList.of();
     }
 
     public static DataPartition hashPartitioned(List<Expr> exprs) {
         return new DataPartition(TPartitionType.HASH_PARTITIONED, exprs);
+    }
+
+    public void substitute(ExprSubstitutionMap smap, Analyzer analyzer) throws AnalysisException {
+        List<Expr> list = Expr.trySubstituteList(partitionExprs, smap, analyzer, false);
+        partitionExprs = ImmutableList.copyOf(list);
     }
 
     public boolean isPartitioned() {
@@ -112,20 +103,7 @@ public class DataPartition {
         if (partitionExprs != null) {
             result.setPartitionExprs(Expr.treesToThrift(partitionExprs));
         }
-        if (partitions != null) {
-            result.setPartitionInfos(DataSplitSink.EtlRangePartitionInfo.listToThrift(partitions));
-        }
         return result;
-    }
-
-    /**
-     * Returns true if 'this' is a partition that is compatible with the
-     * requirements of 's'.
-     * TODO: specify more clearly and implement
-     */
-    public boolean isCompatible(DataPartition s) {
-        // TODO: implement
-        return true;
     }
 
     public String getExplainString(TExplainLevel explainLevel) {
@@ -139,7 +117,7 @@ public class DataPartition {
             for (Expr expr : partitionExprs) {
                 strings.add(expr.toSql());
             }
-            str.append(": " + Joiner.on(", ").join(strings));
+            str.append(": ").append(Joiner.on(", ").join(strings));
         }
         str.append("\n");
         return str.toString();

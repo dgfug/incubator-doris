@@ -20,9 +20,10 @@ package org.apache.doris.load.sync;
 import org.apache.doris.analysis.BinlogDesc;
 import org.apache.doris.analysis.ChannelDescription;
 import org.apache.doris.analysis.CreateDataSyncJobStmt;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.UserException;
@@ -34,12 +35,12 @@ import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.load.sync.SyncFailMsg.MsgType;
 import org.apache.doris.load.sync.canal.CanalSyncJob;
 import org.apache.doris.persist.gson.GsonUtils;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.gson.annotations.SerializedName;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -116,7 +117,7 @@ public abstract class SyncJob implements Writable {
 
     public static SyncJob fromStmt(long jobId, CreateDataSyncJobStmt stmt) throws DdlException {
         String dbName = stmt.getDbName();
-        Database db = Catalog.getCurrentCatalog().getDbOrDdlException(dbName);
+        Database db = Env.getCurrentInternalCatalog().getDbOrDdlException(dbName);
         SyncJob syncJob;
         try {
             switch (stmt.getDataSyncJobType()) {
@@ -182,12 +183,12 @@ public abstract class SyncJob implements Writable {
         if (!isReplay) {
             SyncJobUpdateStateInfo info = new SyncJobUpdateStateInfo(id, jobState, lastStartTimeMs, lastStopTimeMs,
                     finishTimeMs, failMsg);
-            Catalog.getCurrentCatalog().getEditLog().logUpdateSyncJobState(info);
+            Env.getCurrentEnv().getEditLog().logUpdateSyncJobState(info);
         }
     }
 
     private void checkStateTransform(JobState newState) throws UserException {
-        switch (jobState) {
+        switch (jobState) { // CHECKSTYLE IGNORE THIS LINE: missing switch default
             case PENDING:
                 break;
             case RUNNING:
@@ -206,7 +207,7 @@ public abstract class SyncJob implements Writable {
     }
 
     public void checkAndDoUpdate() throws UserException {
-        Database database = Catalog.getCurrentCatalog().getDbNullable(dbId);
+        Database database = Env.getCurrentInternalCatalog().getDbNullable(dbId);
         if (database == null) {
             if (!isCompleted()) {
                 String msg = "The database has been deleted. Change job state to cancelled";
@@ -266,6 +267,18 @@ public abstract class SyncJob implements Writable {
         return "\\N";
     }
 
+    public boolean isExpired(long currentTimeMs) {
+        if (!isCompleted()) {
+            return false;
+        }
+        Preconditions.checkState(finishTimeMs != -1L);
+        long expireTime = Config.label_keep_max_second * 1000L;
+        if ((currentTimeMs - finishTimeMs) > expireTime) {
+            return true;
+        }
+        return false;
+    }
+
     // only use for persist when job state changed
     public static class SyncJobUpdateStateInfo implements Writable {
         @SerializedName(value = "id")
@@ -281,7 +294,8 @@ public abstract class SyncJob implements Writable {
         @SerializedName(value = "failMsg")
         protected SyncFailMsg failMsg;
 
-        public SyncJobUpdateStateInfo(long id, JobState jobState, long lastStartTimeMs, long lastStopTimeMs, long finishTimeMs, SyncFailMsg failMsg) {
+        public SyncJobUpdateStateInfo(long id, JobState jobState, long lastStartTimeMs,
+                long lastStopTimeMs, long finishTimeMs, SyncFailMsg failMsg) {
             this.id = id;
             this.jobState = jobState;
             this.lastStartTimeMs = lastStartTimeMs;
@@ -415,7 +429,7 @@ public abstract class SyncJob implements Writable {
         }
         // set channel id
         for (ChannelDescription channelDescription : channelDescriptions) {
-            channelDescription.setChannelId(Catalog.getCurrentCatalog().getNextId());
+            channelDescription.setChannelId(Env.getCurrentEnv().getNextId());
         }
     }
 
@@ -449,5 +463,9 @@ public abstract class SyncJob implements Writable {
 
     public List<ChannelDescription> getChannelDescriptions() {
         return this.channelDescriptions;
+    }
+
+    public long getFinishTimeMs() {
+        return finishTimeMs;
     }
 }

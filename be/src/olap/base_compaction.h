@@ -15,9 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_BASE_COMPACTION_H
-#define DORIS_BE_SRC_OLAP_BASE_COMPACTION_H
+#pragma once
 
+#include <string>
+#include <vector>
+
+#include "common/status.h"
+#include "io/io_common.h"
 #include "olap/compaction.h"
 
 namespace doris {
@@ -27,31 +31,24 @@ namespace doris {
 //   1. its policy to pick rowsets
 //   2. do compaction to produce new rowset.
 
-class BaseCompaction : public Compaction {
+class BaseCompaction final : public CompactionMixin {
 public:
-    BaseCompaction(TabletSharedPtr tablet, const std::string& label,
-                   const std::shared_ptr<MemTracker>& parent_tracker);
+    BaseCompaction(StorageEngine& engine, const TabletSharedPtr& tablet);
     ~BaseCompaction() override;
 
-    OLAPStatus prepare_compact() override;
-    OLAPStatus execute_compact_impl() override;
+    Status prepare_compact() override;
 
-    std::vector<RowsetSharedPtr> get_input_rowsets() { return _input_rowsets; }
+    Status execute_compact() override;
 
-protected:
-    OLAPStatus pick_rowsets_to_compact() override;
-    std::string compaction_name() const override { return "base compaction"; }
+private:
+    Status pick_rowsets_to_compact();
+    std::string_view compaction_name() const override { return "base compaction"; }
 
     ReaderType compaction_type() const override { return ReaderType::READER_BASE_COMPACTION; }
 
-private:
-    // check if all input rowsets are non overlapping among segments.
-    // a rowset with overlapping segments should be compacted by cumulative compaction first.
-    OLAPStatus _check_rowset_overlapping(const vector<RowsetSharedPtr>& rowsets);
-
-    DISALLOW_COPY_AND_ASSIGN(BaseCompaction);
+    // filter input rowset in some case:
+    // 1. dup key without delete predicate
+    void _filter_input_rowset();
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_BASE_COMPACTION_H

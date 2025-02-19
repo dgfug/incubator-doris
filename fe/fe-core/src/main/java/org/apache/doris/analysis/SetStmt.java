@@ -23,7 +23,7 @@ import org.apache.doris.common.UserException;
 import java.util.List;
 
 // Set variables statement. Now only support simple string
-public class SetStmt extends StatementBase {
+public class SetStmt extends StatementBase implements NotFallbackInParser {
     // variables to modify
     private final List<SetVar> setVars;
 
@@ -33,6 +33,17 @@ public class SetStmt extends StatementBase {
 
     public List<SetVar> getSetVars() {
         return setVars;
+    }
+
+    // remove setvar of non-set-session-var,
+    // change type global to session avoid to write in non-master node.
+    public void modifySetVarsForExecute() {
+        setVars.removeIf(setVar -> setVar.getVarType() != SetVar.SetVarType.SET_SESSION_VAR);
+        for (SetVar var : setVars) {
+            if (var.getType() == SetType.GLOBAL) {
+                var.setType(SetType.SESSION);
+            }
+        }
     }
 
     @Override
@@ -75,12 +86,17 @@ public class SetStmt extends StatementBase {
     public String toString() {
         return toSql();
     }
-    
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.SET;
+    }
+
     @Override
     public RedirectStatus getRedirectStatus() {
         if (setVars != null) {
             for (SetVar var : setVars) {
-                if (var instanceof SetPassVar) {
+                if (var instanceof SetPassVar || var instanceof SetLdapPassVar) {
                     return RedirectStatus.FORWARD_WITH_SYNC;
                 } else if (var.getType() == SetType.GLOBAL) {
                     return RedirectStatus.FORWARD_WITH_SYNC;
@@ -90,4 +106,3 @@ public class SetStmt extends StatementBase {
         return RedirectStatus.NO_FORWARD;
     }
 }
-

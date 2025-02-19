@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/Id.java
+// and modified by Doris
 
 package org.apache.doris.common;
 
@@ -22,38 +25,28 @@ import java.util.ArrayList;
 /**
  * Integer ids that cannot accidentally be compared with ints.
  */
-public class Id<IdType extends Id<IdType>> {
-    static private int INVALID_ID = -1;
+public class Id<IdType extends Id<IdType>> implements Comparable<Id<IdType>> {
     protected final int id;
-
-    public Id() {
-        this.id = INVALID_ID;
-    }
 
     public Id(int id) {
         this.id = id;
     }
 
-    public boolean isValid() {
-        return id != INVALID_ID;
-    }
-
     @Override
     public boolean equals(Object obj) {
-        if (obj == null) {
+        if (this == obj) {
+            return true;
+        }
+        if (obj == null || getClass() != obj.getClass()) {
             return false;
         }
-
-        // only ids of the same subclass are comparable
-        if (obj.getClass() != this.getClass()) {
-            return false;
-        }
-        return ((Id) obj).id == id;
+        Id<?> id1 = (Id<?>) obj;
+        return id == id1.id;
     }
 
     @Override
     public int hashCode() {
-        return Integer.valueOf(id).hashCode();
+        return id;
     }
 
     public int asInt() {
@@ -61,12 +54,17 @@ public class Id<IdType extends Id<IdType>> {
     }
 
     public ArrayList<IdType> asList() {
-        ArrayList<IdType> list = new ArrayList<IdType>();
+        ArrayList<IdType> list = new ArrayList<>();
         list.add((IdType) this);
         return list;
     }
 
     public String toString() {
         return Integer.toString(id);
+    }
+
+    @Override
+    public int compareTo(Id<IdType> idTypeId) {
+        return id - idTypeId.id;
     }
 }

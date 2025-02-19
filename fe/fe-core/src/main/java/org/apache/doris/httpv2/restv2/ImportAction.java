@@ -18,14 +18,17 @@
 package org.apache.doris.httpv2.restv2;
 
 import org.apache.doris.analysis.BrokerDesc;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.parquet.ParquetReader;
 import org.apache.doris.common.util.BrokerUtil;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
+import org.apache.doris.httpv2.rest.RestBaseController;
 import org.apache.doris.thrift.TBrokerFileStatus;
 
 import com.google.common.collect.Lists;
-
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -36,16 +39,12 @@ import org.springframework.web.bind.annotation.RestController;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import lombok.Getter;
-import lombok.Setter;
-
 @RestController
 @RequestMapping("/rest/v2")
-public class ImportAction {
+public class ImportAction extends RestBaseController {
 
     private static final Logger LOG = LogManager.getLogger(ImportAction.class);
 
@@ -75,7 +74,16 @@ public class ImportAction {
      * }
      */
     @RequestMapping(path = "/api/import/file_review", method = RequestMethod.POST)
-    public Object fileReview(@RequestBody FileReviewRequestVo body, HttpServletRequest request, HttpServletResponse response) {
+    public Object fileReview(@RequestBody FileReviewRequestVo body,
+            HttpServletRequest request, HttpServletResponse response) {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
+        if (Config.enable_all_http_auth) {
+            executeCheckPassword(request, response);
+        }
+
         FileInfo fileInfo = body.getFileInfo();
         ConnectInfo connectInfo = body.getConnectInfo();
         BrokerDesc brokerDesc = new BrokerDesc(connectInfo.getBrokerName(), connectInfo.getBrokerProps());
@@ -210,19 +218,4 @@ public class ImportAction {
         private List<String> colNames;
         private List<List<String>> sampleFileLines;
     }
-
-
-    public static void main(String[] args) {
-        ImportAction importAction = new ImportAction();
-        String str = "1,2,3\n4,5,6\n,7,8,9,中国";
-        byte[] fileContentBytes = str.getBytes();
-        System.out.println(fileContentBytes.length);
-        String newStr = new String(fileContentBytes, 0,fileContentBytes.length - 2);
-        System.out.println(newStr);
-
-        FileSample fileSample = new FileSample();
-        importAction.parseContent(",", "\n", newStr.getBytes(), fileSample);
-        System.out.println(fileSample.sampleFileLines);
-    }
-
 }

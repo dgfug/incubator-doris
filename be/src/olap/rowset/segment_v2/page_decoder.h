@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include "common/status.h"     // for Status
-#include "olap/column_block.h" // for ColumnBlockView
+#include "common/status.h" // for Status
+#include "vec/columns/column.h"
 
 namespace doris {
 namespace segment_v2 {
@@ -52,7 +52,7 @@ public:
     //
     // If the given value is less than the lowest value in the page,
     // seeks to the start of the page. If it is higher than the highest
-    // value in the page, then returns Status::NotFound
+    // value in the page, then returns Status::Error<ENTRY_NOT_FOUND>
     //
     // This will only return valid results when the data page
     // consists of values in sorted order.
@@ -67,25 +67,22 @@ public:
     virtual size_t seek_forward(size_t n) {
         size_t step = std::min(n, count() - current_index());
         DCHECK_GE(step, 0);
-        seek_to_position_in_page(current_index() + step);
+        static_cast<void>(seek_to_position_in_page(current_index() + step));
         return step;
     }
 
-    // Fetch the next vector of values from the page into 'column_vector_view'.
-    // The output vector must have space for up to n cells.
-    //
-    // Return the size of read entries .
-    //
-    // In the case that the values are themselves references
-    // to other memory (eg Slices), the referred-to memory is
-    // allocated in the column_vector_view's mem_pool.
-    virtual Status next_batch(size_t* n, ColumnBlockView* dst) = 0;
+    virtual Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) = 0;
+
+    virtual Status read_by_rowids(const rowid_t* rowids, ordinal_t page_first_ordinal, size_t* n,
+                                  vectorized::MutableColumnPtr& dst) {
+        return Status::NotSupported("not implement vec op now");
+    }
 
     // Same as `next_batch` except for not moving forward the cursor.
     // When read array's ordinals in `ArrayFileColumnIterator`, we want to read one extra ordinal
     // but do not want to move forward the cursor.
-    virtual Status peek_next_batch(size_t* n, ColumnBlockView* dst) {
-        return Status::NotSupported("peek_next_batch");
+    virtual Status peek_next_batch(size_t* n, vectorized::MutableColumnPtr& dst) {
+        return Status::NotSupported("not implement vec op now");
     }
 
     // Return the number of elements in this page.

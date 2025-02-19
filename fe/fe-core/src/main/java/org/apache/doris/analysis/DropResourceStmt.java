@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeNameFormat;
@@ -26,11 +26,17 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 // DROP RESOURCE resource_name
-public class DropResourceStmt extends DdlStmt {
+public class DropResourceStmt extends DdlStmt implements NotFallbackInParser {
+    private boolean ifExists;
     private String resourceName;
 
-    public DropResourceStmt(String resourceName) {
+    public DropResourceStmt(boolean ifExists, String resourceName) {
+        this.ifExists = ifExists;
         this.resourceName = resourceName;
+    }
+
+    public boolean isIfExists() {
+        return ifExists;
     }
 
     public String getResourceName() {
@@ -42,11 +48,11 @@ public class DropResourceStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
-        FeNameFormat.checkResourceName(resourceName);
+        FeNameFormat.checkResourceName(resourceName, ResourceTypeEnum.GENERAL);
     }
 
     @Override
@@ -55,5 +61,10 @@ public class DropResourceStmt extends DdlStmt {
         sb.append("DROP ");
         sb.append("RESOURCE `").append(resourceName).append("`");
         return sb.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

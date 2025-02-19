@@ -15,18 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_THRIFT_SERVER_H
-#define DORIS_BE_SRC_COMMON_UTIL_THRIFT_SERVER_H
+#pragma once
 
-#include <thrift/TProcessor.h>
 #include <thrift/server/TServer.h>
 
-#include <boost/thread.hpp>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "common/status.h"
 #include "util/metrics.h"
+
+namespace apache {
+namespace thrift {
+class TProcessor;
+} // namespace thrift
+} // namespace apache
 
 namespace doris {
 // Utility class for all Thrift servers. Runs a TNonblockingServer(default) or a
@@ -37,11 +43,12 @@ namespace doris {
 class ThriftServer {
 public:
     // An opaque identifier for the current session, which identifies a client connection.
-    typedef std::string SessionKey;
+    using SessionKey = std::string;
 
     // Interface class for receiving session creation / termination events.
     class SessionHandlerIf {
     public:
+        virtual ~SessionHandlerIf() = default;
         // Called when a session is established (when a client connects).
         virtual void session_start(const SessionKey& session_key) = 0;
 
@@ -73,7 +80,7 @@ public:
                  int num_worker_threads = DEFAULT_WORKER_THREADS,
                  ServerType server_type = THREADED);
 
-    ~ThriftServer() {}
+    ~ThriftServer();
 
     int port() const { return _port; }
 
@@ -118,14 +125,14 @@ private:
     const std::string _name;
 
     // Thread that runs the TNonblockingServer::serve loop
-    std::unique_ptr<boost::thread> _server_thread;
+    std::unique_ptr<std::thread> _server_thread;
 
     // Thrift housekeeping
     std::unique_ptr<apache::thrift::server::TServer> _server;
     std::shared_ptr<apache::thrift::TProcessor> _processor;
 
-    // If not NULL, called when session events happen. Not owned by us.
-    SessionHandlerIf* _session_handler;
+    // If not nullptr, called when session events happen. Not owned by us.
+    SessionHandlerIf* _session_handler = nullptr;
 
     // Protects _session_keys
     std::mutex _session_keys_lock;
@@ -138,15 +145,14 @@ private:
     // Helper class which monitors starting servers. Needs access to internal members, and
     // is not used outside of this class.
     class ThriftServerEventProcessor;
+
     friend class ThriftServerEventProcessor;
 
     std::shared_ptr<MetricEntity> _thrift_server_metric_entity;
     // Number of currently active connections
-    IntGauge* thrift_current_connections;
+    IntGauge* thrift_current_connections = nullptr;
     // Total connections made over the lifetime of this server
-    IntCounter* thrift_connections_total;
+    IntCounter* thrift_connections_total = nullptr;
 };
 
 } // namespace doris
-
-#endif

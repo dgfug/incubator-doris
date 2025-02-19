@@ -17,53 +17,65 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DatabaseIf;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.JdbcTable;
 import org.apache.doris.catalog.MaterializedIndexMeta;
 import org.apache.doris.catalog.MysqlTable;
 import org.apache.doris.catalog.OdbcTable;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.catalog.Table;
-import org.apache.doris.catalog.Table.TableType;
+import org.apache.doris.catalog.TableIf;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.proc.IndexSchemaProcNode;
 import org.apache.doris.common.proc.ProcNodeInterface;
-import org.apache.doris.common.proc.ProcResult;
 import org.apache.doris.common.proc.ProcService;
 import org.apache.doris.common.proc.TableProcDir;
+import org.apache.doris.common.util.Util;
+import org.apache.doris.datasource.CatalogIf;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
-import org.apache.commons.lang.StringUtils;
-
-import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
-public class DescribeStmt extends ShowStmt {
+public class DescribeStmt extends ShowStmt implements NotFallbackInParser {
+    private static final Logger LOG = LogManager.getLogger(DescribeStmt.class);
     private static final ShowResultSetMetaData DESC_OLAP_TABLE_ALL_META_DATA =
             ShowResultSetMetaData.builder()
                     .addColumn(new Column("IndexName", ScalarType.createVarchar(20)))
                     .addColumn(new Column("IndexKeysType", ScalarType.createVarchar(20)))
                     .addColumn(new Column("Field", ScalarType.createVarchar(20)))
                     .addColumn(new Column("Type", ScalarType.createVarchar(20)))
+                    .addColumn(new Column("InternalType", ScalarType.createVarchar(20)))
                     .addColumn(new Column("Null", ScalarType.createVarchar(10)))
                     .addColumn(new Column("Key", ScalarType.createVarchar(10)))
                     .addColumn(new Column("Default", ScalarType.createVarchar(30)))
                     .addColumn(new Column("Extra", ScalarType.createVarchar(30)))
                     .addColumn(new Column("Visible", ScalarType.createVarchar(10)))
+                    .addColumn(new Column("DefineExpr", ScalarType.createVarchar(30)))
+                    .addColumn(new Column("WhereClause", ScalarType.createVarchar(30)))
                     .build();
 
     private static final ShowResultSetMetaData DESC_MYSQL_TABLE_ALL_META_DATA =
@@ -81,16 +93,31 @@ public class DescribeStmt extends ShowStmt {
 
     private TableName dbTableName;
     private ProcNodeInterface node;
-    
-    List<List<String>> totalRows;
+    private PartitionNames partitionNames;
+
+    List<List<String>> totalRows = new LinkedList<List<String>>();
 
     private boolean isAllTables;
-    private boolean isOlapTable;
+    private boolean isOlapTable = false;
+
+    TableValuedFunctionRef tableValuedFunctionRef;
+    boolean isTableValuedFunction;
 
     public DescribeStmt(TableName dbTableName, boolean isAllTables) {
         this.dbTableName = dbTableName;
-        this.totalRows = new LinkedList<List<String>>();
         this.isAllTables = isAllTables;
+    }
+
+    public DescribeStmt(TableName dbTableName, boolean isAllTables, PartitionNames partitionNames) {
+        this.dbTableName = dbTableName;
+        this.isAllTables = isAllTables;
+        this.partitionNames = partitionNames;
+    }
+
+    public DescribeStmt(TableValuedFunctionRef tableValuedFunctionRef) {
+        this.tableValuedFunctionRef = tableValuedFunctionRef;
+        this.isTableValuedFunction = true;
+        this.isAllTables = false;
     }
 
     public boolean isAllTables() {
@@ -98,38 +125,93 @@ public class DescribeStmt extends ShowStmt {
     }
 
     @Override
-    public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
-        dbTableName.analyze(analyzer);
-        
-        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), dbTableName.getDb(),
-                                                                dbTableName.getTbl(), PrivPredicate.SHOW)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "DESCRIBE",
-                                                ConnectContext.get().getQualifiedUser(),
-                                                ConnectContext.get().getRemoteIP(),
-                                                dbTableName.getTbl());
+    public void analyze(Analyzer analyzer) throws UserException {
+        // First handle meta table.
+        // It will convert this to corresponding table valued functions
+        // eg: DESC table$partitions -> partition_values(...)
+        if (dbTableName != null) {
+            dbTableName.analyze(analyzer);
+            CatalogIf catalog = Env.getCurrentEnv().getCatalogMgr().getCatalogOrAnalysisException(dbTableName.getCtl());
+            Pair<String, String> sourceTableNameWithMetaName = catalog.getSourceTableNameWithMetaTableName(
+                    dbTableName.getTbl());
+            if (!Strings.isNullOrEmpty(sourceTableNameWithMetaName.second)) {
+                isTableValuedFunction = true;
+                Optional<TableValuedFunctionRef> optTvfRef = catalog.getMetaTableFunctionRef(
+                        dbTableName.getDb(), dbTableName.getTbl());
+                if (!optTvfRef.isPresent()) {
+                    throw new AnalysisException("meta table not found: " + sourceTableNameWithMetaName.second);
+                }
+                tableValuedFunctionRef = optTvfRef.get();
+            }
         }
 
-        Database db = Catalog.getCurrentCatalog().getDbOrAnalysisException(dbTableName.getDb());
-        Table table = db.getTableOrAnalysisException(dbTableName.getTbl());
+        if (!isAllTables && isTableValuedFunction) {
+            tableValuedFunctionRef.analyze(analyzer);
+            List<Column> columns = tableValuedFunctionRef.getTable().getBaseSchema();
+            for (Column column : columns) {
+                List<String> row = Arrays.asList(
+                        column.getName(),
+                        column.getOriginType().hideVersionForVersionColumn(true),
+                        column.isAllowNull() ? "Yes" : "No",
+                        ((Boolean) column.isKey()).toString(),
+                        column.getDefaultValue() == null
+                                ? FeConstants.null_string : column.getDefaultValue(),
+                        "NONE"
+                );
+                totalRows.add(row);
+            }
+            return;
+        }
 
+        if (partitionNames != null) {
+            partitionNames.analyze(analyzer);
+            if (partitionNames.isTemp()) {
+                throw new AnalysisException("Do not support temp partitions");
+            }
+        }
+
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkTblPriv(ConnectContext.get(), dbTableName, PrivPredicate.SHOW)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "DESCRIBE",
+                    ConnectContext.get().getQualifiedUser(), ConnectContext.get().getRemoteIP(),
+                    dbTableName.toString());
+        }
+
+        CatalogIf catalog = Env.getCurrentEnv().getCatalogMgr().getCatalogOrAnalysisException(dbTableName.getCtl());
+        DatabaseIf db = catalog.getDbOrAnalysisException(dbTableName.getDb());
+        TableIf table = db.getTableOrDdlException(dbTableName.getTbl());
         table.readLock();
         try {
             if (!isAllTables) {
                 // show base table schema only
-                String procString = "/dbs/" + db.getId() + "/" + table.getId() + "/" + TableProcDir.INDEX_SCHEMA
-                        + "/";
-                if (table.getType() == TableType.OLAP) {
+                String procString = "/catalogs/" + catalog.getId() + "/" + db.getId() + "/" + table.getId() + "/"
+                        + TableProcDir.INDEX_SCHEMA + "/";
+                if (table instanceof OlapTable) {
                     procString += ((OlapTable) table).getBaseIndexId();
                 } else {
+                    if (partitionNames != null) {
+                        throw new AnalysisException(dbTableName.getTbl()
+                                            + " is not a OLAP table, describe table failed");
+                    }
                     procString += table.getId();
                 }
-
+                if (partitionNames != null) {
+                    procString += "/";
+                    StringBuilder builder = new StringBuilder();
+                    for (String str : partitionNames.getPartitionNames()) {
+                        builder.append(str);
+                        builder.append(",");
+                    }
+                    builder.deleteCharAt(builder.length() - 1);
+                    procString += builder.toString();
+                }
                 node = ProcService.getInstance().open(procString);
                 if (node == null) {
                     throw new AnalysisException("Describe table[" + dbTableName.getTbl() + "] failed");
                 }
             } else {
-                if (table.getType() == TableType.OLAP) {
+                Util.prohibitExternalCatalog(dbTableName.getCtl(), this.getClass().getSimpleName() + " ALL");
+                if (table instanceof OlapTable) {
                     isOlapTable = true;
                     OlapTable olapTable = (OlapTable) table;
                     Set<String> bfColumns = olapTable.getCopiedBfColumns();
@@ -156,7 +238,7 @@ public class DescribeStmt extends ShowStmt {
                             // Extra string (aggregation and bloom filter)
                             List<String> extras = Lists.newArrayList();
                             if (column.getAggregationType() != null) {
-                                extras.add(column.getAggregationType().name());
+                                extras.add(column.getAggregationString());
                             }
                             if (bfColumns != null && bfColumns.contains(column.getName())) {
                                 extras.add("BLOOM_FILTER");
@@ -166,18 +248,47 @@ public class DescribeStmt extends ShowStmt {
                             List<String> row = Arrays.asList(
                                     "",
                                     "",
-                                    column.getDisplayName(),
+                                    column.getName(),
+                                    column.getOriginType().toString(),
                                     column.getOriginType().toString(),
                                     column.isAllowNull() ? "Yes" : "No",
                                     ((Boolean) column.isKey()).toString(),
-                                    column.getDefaultValue() == null ? FeConstants.null_string : column.getDefaultValue(),
+                                    column.getDefaultValue() == null
+                                            ? FeConstants.null_string
+                                            : column.getDefaultValue(),
                                     extraStr,
-                                    ((Boolean) column.isVisible()).toString()
-                            );
+                                    ((Boolean) column.isVisible()).toString(),
+                                    column.getDefineExpr() == null ? "" : column.getDefineExpr().toSql(),
+                                    "");
+
+                            if (column.getOriginType().isDatetimeV2()) {
+                                StringBuilder typeStr = new StringBuilder("DATETIME");
+                                if (((ScalarType) column.getOriginType()).getScalarScale() > 0) {
+                                    typeStr.append("(").append(((ScalarType) column.getOriginType()).getScalarScale())
+                                            .append(")");
+                                }
+                                row.set(3, typeStr.toString());
+                            } else if (column.getOriginType().isDateV2()) {
+                                row.set(3, "DATE");
+                            } else if (column.getOriginType().isDecimalV3()) {
+                                StringBuilder typeStr = new StringBuilder("DECIMAL");
+                                ScalarType sType = (ScalarType) column.getOriginType();
+                                int scale = sType.getScalarScale();
+                                int precision = sType.getScalarPrecision();
+                                // not default
+                                if (scale > 0 && precision != 9) {
+                                    typeStr.append("(").append(precision).append(", ").append(scale)
+                                            .append(")");
+                                }
+                                row.set(3, typeStr.toString());
+                            }
 
                             if (j == 0) {
                                 row.set(0, indexName);
                                 row.set(1, indexMeta.getKeysType().name());
+                                Expr where = indexMeta.getWhereClause();
+                                row.set(DESC_OLAP_TABLE_ALL_META_DATA.getColumns().size() - 1,
+                                        where == null ? "" : where.toSqlWithoutTbl());
                             }
 
                             totalRows.add(row);
@@ -199,6 +310,13 @@ public class DescribeStmt extends ShowStmt {
                             odbcTable.getOdbcDriver(),
                             odbcTable.getOdbcTableTypeName());
                     totalRows.add(row);
+                } else if (table.getType() == TableType.JDBC) {
+                    isOlapTable = false;
+                    JdbcTable jdbcTable = (JdbcTable) table;
+                    List<String> row = Arrays.asList(jdbcTable.getJdbcUrl(), jdbcTable.getJdbcUser(),
+                            jdbcTable.getJdbcPasswd(), jdbcTable.getDriverClass(), jdbcTable.getDriverUrl(),
+                            jdbcTable.getExternalTableName(), jdbcTable.getResourceName(), jdbcTable.getJdbcTypeName());
+                    totalRows.add(row);
                 } else if (table.getType() == TableType.MYSQL) {
                     isOlapTable = false;
                     MysqlTable mysqlTable = (MysqlTable) table;
@@ -207,7 +325,8 @@ public class DescribeStmt extends ShowStmt {
                                                      mysqlTable.getUserName(),
                                                      mysqlTable.getPasswd(),
                                                      mysqlTable.getMysqlDatabaseName(),
-                                                     mysqlTable.getMysqlTableName());
+                                                     mysqlTable.getMysqlTableName(),
+                                                     mysqlTable.getCharset());
                     totalRows.add(row);
                 } else {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_UNKNOWN_STORAGE_ENGINE, table.getType());
@@ -221,6 +340,7 @@ public class DescribeStmt extends ShowStmt {
     public String getTableName() {
         return dbTableName.getTbl();
     }
+
     public String getDb() {
         return dbTableName.getDb();
     }
@@ -229,8 +349,25 @@ public class DescribeStmt extends ShowStmt {
         if (isAllTables) {
             return totalRows;
         } else {
+            if (isTableValuedFunction) {
+                return totalRows;
+            }
             Preconditions.checkNotNull(node);
-            return node.fetchResult().getRows();
+            List<List<String>> rows = node.fetchResult().getRows();
+            List<List<String>> res = new ArrayList<>();
+            for (List<String> row : rows) {
+                try {
+                    Env.getCurrentEnv().getAccessManager()
+                            .checkColumnsPriv(ConnectContext.get().getCurrentUserIdentity(), dbTableName.getCtl(),
+                                    getDb(), getTableName(), Sets.newHashSet(row.get(0)), PrivPredicate.SHOW);
+                    res.add(row);
+                } catch (UserException e) {
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug(e.getMessage());
+                    }
+                }
+            }
+            return res;
         }
     }
 
@@ -238,15 +375,7 @@ public class DescribeStmt extends ShowStmt {
     public ShowResultSetMetaData getMetaData() {
         if (!isAllTables) {
             ShowResultSetMetaData.Builder builder = ShowResultSetMetaData.builder();
-
-            ProcResult result = null;
-            try {
-                result = node.fetchResult();
-            } catch (AnalysisException e) {
-                return builder.build();
-            }
-
-            for (String col : result.getColumnNames()) {
+            for (String col : IndexSchemaProcNode.TITLE_NAMES) {
                 builder.addColumn(new Column(col, ScalarType.createVarchar(30)));
             }
             return builder.build();
@@ -277,3 +406,4 @@ public class DescribeStmt extends ShowStmt {
         return emptyRow;
     }
 }
+

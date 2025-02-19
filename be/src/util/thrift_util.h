@@ -15,18 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_THRIFT_UTIL_H
-#define DORIS_BE_SRC_COMMON_UTIL_THRIFT_UTIL_H
+#pragma once
 
+#include <gen_cpp/DataSinks_types.h>
+#include <gen_cpp/Types_types.h>
 #include <thrift/TApplicationException.h>
-#include <thrift/protocol/TBinaryProtocol.h>
-#include <thrift/protocol/TDebugProtocol.h>
 #include <thrift/transport/TBufferTransports.h>
 
-#include <sstream>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "common/status.h"
+
+namespace apache::thrift::protocol {
+class TProtocol;
+class TProtocolFactory;
+} // namespace apache::thrift::protocol
 
 namespace doris {
 
@@ -48,10 +56,10 @@ public:
     template <class T>
     Status serialize(T* obj, std::vector<uint8_t>* result) {
         uint32_t len = 0;
-        uint8_t* buffer = NULL;
+        uint8_t* buffer = nullptr;
         RETURN_IF_ERROR(serialize<T>(obj, &len, &buffer));
         result->resize(len);
-        memcpy(&((*result)[0]), buffer, len);
+        memcpy(result->data(), buffer, len);
         return Status::OK();
     }
 
@@ -64,9 +72,7 @@ public:
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
         } catch (std::exception& e) {
-            std::stringstream msg;
-            msg << "Couldn't serialize thrift object:\n" << e.what();
-            return Status::InternalError(msg.str());
+            return Status::InternalError("Couldn't serialize thrift object:\n{}", e.what());
         }
 
         _mem_buffer->getBuffer(buffer, len);
@@ -79,9 +85,7 @@ public:
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
         } catch (apache::thrift::TApplicationException& e) {
-            std::stringstream msg;
-            msg << "Couldn't serialize thrift object:\n" << e.what();
-            return Status::InternalError(msg.str());
+            return Status::InternalError("Couldn't serialize thrift object:\n{}", e.what());
         }
 
         *result = _mem_buffer->getBufferAsString();
@@ -94,9 +98,7 @@ public:
             _mem_buffer->resetBuffer();
             obj->write(_protocol.get());
         } catch (apache::thrift::TApplicationException& e) {
-            std::stringstream msg;
-            msg << "Couldn't serialize thrift object:\n" << e.what();
-            return Status::InternalError(msg.str());
+            return Status::InternalError("Couldn't serialize thrift object:\n{}", e.what());
         }
 
         return Status::OK();
@@ -131,17 +133,21 @@ Status deserialize_thrift_msg(const uint8_t* buf, uint32_t* len, bool compact,
     // Deserialize msg bytes into c++ thrift msg using memory
     // transport. TMemoryBuffer is not const-safe, although we use it in
     // a const-safe way, so we have to explicitly cast away the const.
+    auto conf = std::make_shared<apache::thrift::TConfiguration>();
+    // On Thrift 0.14.0+, need use TConfiguration to raise the max message size.
+    // max message size is 100MB default, so make it unlimited.
+    conf->setMaxMessageSize(std::numeric_limits<int>::max());
     std::shared_ptr<apache::thrift::transport::TMemoryBuffer> tmem_transport(
-            new apache::thrift::transport::TMemoryBuffer(const_cast<uint8_t*>(buf), *len));
+            new apache::thrift::transport::TMemoryBuffer(
+                    const_cast<uint8_t*>(buf), *len,
+                    apache::thrift::transport::TMemoryBuffer::OBSERVE, conf));
     std::shared_ptr<apache::thrift::protocol::TProtocol> tproto =
             create_deserialize_protocol(tmem_transport, compact);
 
     try {
         deserialized_msg->read(tproto.get());
     } catch (std::exception& e) {
-        std::stringstream msg;
-        msg << "couldn't deserialize thrift msg:\n" << e.what();
-        return Status::InternalError(msg.str());
+        return Status::InternalError<false>("Couldn't deserialize thrift msg:\n{}", e.what());
     } catch (...) {
         // TODO: Find the right exception for 0 bytes
         return Status::InternalError("Unknown exception");
@@ -169,6 +175,8 @@ void t_network_address_to_string(const TNetworkAddress& address, std::string* ou
 // string representation
 bool t_network_address_comparator(const TNetworkAddress& a, const TNetworkAddress& b);
 
-} // namespace doris
+PURE std::string to_string(const TUniqueId& id);
 
-#endif
+PURE bool _has_inverted_index_v1_or_partial_update(TOlapTableSink sink);
+
+} // namespace doris

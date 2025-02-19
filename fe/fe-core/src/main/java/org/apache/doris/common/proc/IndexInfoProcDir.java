@@ -18,12 +18,12 @@
 package org.apache.doris.common.proc;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.DatabaseIf;
 import org.apache.doris.catalog.MaterializedIndexMeta;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.Table;
-import org.apache.doris.catalog.Table.TableType;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.qe.SessionVariable;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
@@ -38,15 +38,14 @@ import java.util.Set;
  * show indexNames(to schema)
  */
 public class IndexInfoProcDir implements ProcDirInterface {
-    public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
-            .add("IndexId").add("IndexName").add("SchemaVersion").add("SchemaHash")
-            .add("ShortKeyColumnCount").add("StorageType").add("Keys")
-            .build();
+    public static final ImmutableList<String> TITLE_NAMES =
+            new ImmutableList.Builder<String>().add("IndexId").add("IndexName").add("SchemaVersion").add("SchemaHash")
+                    .add("ShortKeyColumnCount").add("StorageType").add("Keys").build();
 
-    private Database db;
-    private Table table;
+    private DatabaseIf db;
+    private TableIf table;
 
-    public IndexInfoProcDir(Database db, Table table) {
+    public IndexInfoProcDir(DatabaseIf db, TableIf table) {
         this.db = db;
         this.table = table;
     }
@@ -60,7 +59,7 @@ public class IndexInfoProcDir implements ProcDirInterface {
         result.setNames(TITLE_NAMES);
         table.readLock();
         try {
-            if (table.getType() == TableType.OLAP) {
+            if (table.isManagedTable()) {
                 OlapTable olapTable = (OlapTable) table;
 
                 // indices order
@@ -92,7 +91,7 @@ public class IndexInfoProcDir implements ProcDirInterface {
                             builder.toString()));
                 }
             } else {
-                result.addRow(Lists.newArrayList("-1", table.getName(), "", "", "", "", ""));
+                result.addRow(Lists.newArrayList(String.valueOf(table.getId()), table.getName(), "", "", "", "", ""));
             }
 
             return result;
@@ -110,7 +109,7 @@ public class IndexInfoProcDir implements ProcDirInterface {
     public ProcNodeInterface lookup(String idxIdStr) throws AnalysisException {
         Preconditions.checkNotNull(db);
         Preconditions.checkNotNull(table);
-        
+
         long idxId;
         try {
             idxId = Long.valueOf(idxIdStr);
@@ -122,13 +121,17 @@ public class IndexInfoProcDir implements ProcDirInterface {
         try {
             List<Column> schema = null;
             Set<String> bfColumns = null;
-            if (table.getType() == TableType.OLAP) {
+            if (table.isManagedTable()) {
                 OlapTable olapTable = (OlapTable) table;
                 schema = olapTable.getSchemaByIndexId(idxId);
                 if (schema == null) {
                     throw new AnalysisException("Index " + idxId + " does not exist");
                 }
                 bfColumns = olapTable.getCopiedBfColumns();
+                if (olapTable.hasVariantColumns()
+                                    && SessionVariable.enableDescribeExtendVariantColumn()) {
+                    return new RemoteIndexSchemaProcDir(table, schema, bfColumns);
+                }
             } else {
                 schema = table.getBaseSchema();
             }
@@ -137,5 +140,4 @@ public class IndexInfoProcDir implements ProcDirInterface {
             table.readUnlock();
         }
     }
-
 }

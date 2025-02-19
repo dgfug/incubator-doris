@@ -18,8 +18,9 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.InfoSchemaDb;
+import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
@@ -28,42 +29,60 @@ import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 // SHOW TABLES
-public class ShowTableStmt extends ShowStmt {
+public class ShowTableStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowTableStmt.class);
     private static final String NAME_COL_PREFIX = "Tables_in_";
     private static final String TYPE_COL = "Table_type";
-    private static final TableName TABLE_NAME = new TableName(InfoSchemaDb.DATABASE_NAME, "tables");
+    private static final String STORAGE_FORMAT_COL = "Storage_format";
+    private static final String INVERTED_INDEX_STORAGE_FORMAT_COL = "Inverted_index_storage_format";
     private String db;
-    private boolean isVerbose;
-    private String pattern;
+    private String catalog;
+    private final boolean isVerbose;
+    private TableType type;
+    private final String pattern;
     private Expr where;
     private SelectStmt selectStmt;
 
-    public ShowTableStmt(String db, boolean isVerbose, String pattern) {
+    public ShowTableStmt(String db, String catalog, boolean isVerbose, String pattern) {
         this.db = db;
         this.isVerbose = isVerbose;
         this.pattern = pattern;
         this.where = null;
+        this.catalog = catalog;
     }
 
-    public ShowTableStmt(String db, boolean isVerbose, String pattern, Expr where) {
+    public ShowTableStmt(String db, String catalog, boolean isVerbose, String pattern, Expr where) {
         this.db = db;
         this.isVerbose = isVerbose;
         this.pattern = pattern;
         this.where = where;
+        this.catalog = catalog;
+    }
+
+    public ShowTableStmt(String db, String catalog, boolean isVerbose, TableType type, String pattern,
+                         Expr where) {
+        this(db, catalog, isVerbose, pattern, where);
+        this.type = type;
     }
 
     public String getDb() {
         return db;
     }
 
+    public String getCatalog() {
+        return catalog;
+    }
+
     public boolean isVerbose() {
         return isVerbose;
+    }
+
+    public TableType getType() {
+        return type;
     }
 
     public String getPattern() {
@@ -77,8 +96,12 @@ public class ShowTableStmt extends ShowStmt {
             if (Strings.isNullOrEmpty(db)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            db = ClusterNamespace.getFullName(analyzer.getClusterName(), db);
+        }
+        if (Strings.isNullOrEmpty(catalog)) {
+            catalog = analyzer.getDefaultCatalog();
+            if (Strings.isNullOrEmpty(catalog)) {
+                ErrorReport.reportAnalysisException(ErrorCode.ERR_WRONG_NAME_FOR_CATALOG);
+            }
         }
 
         // we do not check db privs here. because user may not have any db privs,
@@ -94,25 +117,32 @@ public class ShowTableStmt extends ShowStmt {
             return selectStmt;
         }
         analyze(analyzer);
+        TableName tablesTableName = new TableName(catalog, InfoSchemaDb.DATABASE_NAME, "tables");
+
         // Columns
         SelectList selectList = new SelectList();
         ExprSubstitutionMap aliasMap = new ExprSubstitutionMap(false);
-        SelectListItem item = new SelectListItem(new SlotRef(TABLE_NAME, "TABLE_NAME"),
+        SelectListItem item = new SelectListItem(new SlotRef(tablesTableName, "TABLE_NAME"),
                 NAME_COL_PREFIX + ClusterNamespace.getNameFromFullName(db));
         selectList.addItem(item);
         aliasMap.put(new SlotRef(null, NAME_COL_PREFIX + ClusterNamespace.getNameFromFullName(db)),
                 item.getExpr().clone(null));
         if (isVerbose) {
-            item = new SelectListItem(new SlotRef(TABLE_NAME, "TABLE_TYPE"), TYPE_COL);
+            item = new SelectListItem(new SlotRef(tablesTableName, "TABLE_TYPE"), TYPE_COL);
             selectList.addItem(item);
             aliasMap.put(new SlotRef(null, TYPE_COL), item.getExpr().clone(null));
         }
+        if (type != null) {
+            BinaryPredicate viewFilter = new BinaryPredicate(BinaryPredicate.Operator.EQ,
+                    new SlotRef(tablesTableName, "ENGINE"), new StringLiteral(type.toEngineName()));
+            where = CompoundPredicate.createConjunction(viewFilter, where);
+        }
         where = where.substitute(aliasMap);
         selectStmt = new SelectStmt(selectList,
-                new FromClause(Lists.newArrayList(new TableRef(TABLE_NAME, null))),
+                new FromClause(Lists.newArrayList(new TableRef(tablesTableName, null))),
                 where, null, null, null, LimitElement.NO_LIMIT);
 
-        analyzer.setSchemaInfo(ClusterNamespace.getNameFromFullName(db), null, null);
+        analyzer.setSchemaInfo(ClusterNamespace.getNameFromFullName(db), null, catalog);
 
         return selectStmt;
     }
@@ -124,9 +154,25 @@ public class ShowTableStmt extends ShowStmt {
         if (isVerbose) {
             sb.append(" FULL");
         }
-        sb.append(" TABLES");
+        if (type != null) {
+            switch (type) {
+                // todo(only show views from now)
+                case VIEW:
+                    sb.append(" VIEWS");
+                    break;
+                default:
+                    sb.append(" TABLES");
+            }
+        } else {
+            sb.append(" TABLES");
+        }
         if (!Strings.isNullOrEmpty(db)) {
-            sb.append(" FROM ").append(db);
+            if (!Strings.isNullOrEmpty(catalog)) {
+                sb.append(" FROM ").append(catalog);
+                sb.append(".").append(ClusterNamespace.getNameFromFullName(db));
+            } else {
+                sb.append(" FROM ").append(db);
+            }
         }
         if (pattern != null) {
             sb.append(" LIKE '").append(pattern).append("'");
@@ -146,6 +192,8 @@ public class ShowTableStmt extends ShowStmt {
                 new Column(NAME_COL_PREFIX + ClusterNamespace.getNameFromFullName(db), ScalarType.createVarchar(20)));
         if (isVerbose) {
             builder.addColumn(new Column(TYPE_COL, ScalarType.createVarchar(20)));
+            builder.addColumn(new Column(STORAGE_FORMAT_COL, ScalarType.createVarchar(20)));
+            builder.addColumn(new Column(INVERTED_INDEX_STORAGE_FORMAT_COL, ScalarType.createVarchar(20)));
         }
         return builder.build();
     }

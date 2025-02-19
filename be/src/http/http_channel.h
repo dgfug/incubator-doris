@@ -15,16 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_HTTP_CHANNEL_H
-#define DORIS_BE_SRC_COMMON_UTIL_HTTP_CHANNEL_H
+#pragma once
 
-#include <cstdint>
+#include <stddef.h>
+
 #include <string>
+#include <vector>
 
 #include "http/http_status.h"
 
-struct mg_connection;
-
+struct bufferevent_rate_limit_group;
 namespace doris {
 
 class HttpRequest;
@@ -45,12 +45,18 @@ public:
 
     static void send_reply(HttpRequest* request, HttpStatus status, const std::string& content);
 
-    static void send_file(HttpRequest* request, int fd, size_t off, size_t size);
+    static void send_file(HttpRequest* request, int fd, size_t off, size_t size,
+                          bufferevent_rate_limit_group* rate_limit_group = nullptr);
+
+    static void send_files(HttpRequest* request, const std::string& root_dir,
+                           std::vector<std::string> local_files,
+                           bufferevent_rate_limit_group* rate_limit_group);
+
+    static void send_files(HttpRequest* request, const std::string& root_dir,
+                           std::vector<std::string> local_files);
 
     static bool compress_content(const std::string& accept_encoding, const std::string& input,
                                  std::string* output);
 };
 
 } // namespace doris
-
-#endif

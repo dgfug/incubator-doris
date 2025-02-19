@@ -17,30 +17,47 @@
 
 package org.apache.doris.persist;
 
-import com.google.gson.annotations.SerializedName;
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.common.FeMetaVersion;
+import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.persist.gson.GsonPostProcessable;
 import org.apache.doris.persist.gson.GsonUtils;
+
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-public class DropDbInfo implements Writable {
+public class DropDbInfo implements Writable, GsonPostProcessable {
+    @SerializedName(value = "ctl")
+    private String ctlName;
     @SerializedName(value = "dbName")
     private String dbName;
     @SerializedName(value = "forceDrop")
     private boolean forceDrop = false;
+    @SerializedName(value = "recycleTime")
+    private long recycleTime = 0;
 
     public DropDbInfo() {
-        this("", false);
+        this("", false, 0);
     }
 
-    public DropDbInfo(String dbName, boolean forceDrop) {
+    // for external table
+    public DropDbInfo(String ctlName, String dbName) {
+        this.ctlName = ctlName;
+        this.dbName = dbName;
+    }
+
+    // for internal table
+    public DropDbInfo(String dbName, boolean forceDrop, long recycleTime) {
         this.dbName = dbName;
         this.forceDrop = forceDrop;
+        this.recycleTime = recycleTime;
+    }
+
+    public String getCtlName() {
+        return ctlName;
     }
 
     public String getDbName() {
@@ -51,20 +68,18 @@ public class DropDbInfo implements Writable {
         return  forceDrop;
     }
 
+    public Long getRecycleTime() {
+        return  recycleTime;
+    }
+
     @Deprecated
     private void readFields(DataInput in) throws IOException {
         dbName = Text.readString(in);
     }
 
     public static DropDbInfo read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_89) {
-            DropDbInfo info = new DropDbInfo();
-            info.readFields(in);
-            return info;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, DropDbInfo.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, DropDbInfo.class);
     }
 
     @Override
@@ -85,7 +100,12 @@ public class DropDbInfo implements Writable {
         DropDbInfo info = (DropDbInfo) obj;
 
         return (dbName.equals(info.getDbName()))
-                && (forceDrop == info.isForceDrop());
+            && (forceDrop == info.isForceDrop())
+            && (recycleTime == info.getRecycleTime());
     }
 
+    @Override
+    public void gsonPostProcess() throws IOException {
+        dbName = ClusterNamespace.getNameFromFullName(dbName);
+    }
 }

@@ -18,16 +18,20 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.InfoSchemaDb;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.qe.ShowResultSetMetaData;
+
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 
 // Show database statement.
-public class ShowDbStmt extends ShowStmt {
-    private static final TableName TABLE_NAME = new TableName(InfoSchemaDb.DATABASE_NAME, "schemata");
+public class ShowDbStmt extends ShowStmt implements NotFallbackInParser {
+    private static final TableName TABLE_NAME = new TableName(InternalCatalog.INTERNAL_CATALOG_NAME,
+            InfoSchemaDb.DATABASE_NAME, "schemata");
     private static final String DB_COL = "Database";
     private static final ShowResultSetMetaData META_DATA =
             ShowResultSetMetaData.builder()
@@ -35,6 +39,7 @@ public class ShowDbStmt extends ShowStmt {
                     .build();
 
     private String pattern;
+    private String catalogName;
     private Expr where;
     private SelectStmt selectStmt;
 
@@ -42,18 +47,24 @@ public class ShowDbStmt extends ShowStmt {
         this.pattern = pattern;
     }
 
-    public ShowDbStmt(String pattern, Expr where) {
+    public ShowDbStmt(String pattern, Expr where, String catalogName) {
         this.pattern = pattern;
         this.where = where;
+        this.catalogName = catalogName;
     }
 
     public String getPattern() {
         return pattern;
     }
 
+    public String getCatalogName() {
+        return catalogName;
+    }
+
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
         super.analyze(analyzer);
+        this.catalogName = this.catalogName == null ? analyzer.getDefaultCatalog() : this.catalogName;
     }
 
     @Override
@@ -67,14 +78,15 @@ public class ShowDbStmt extends ShowStmt {
         // Columns
         SelectList selectList = new SelectList();
         ExprSubstitutionMap aliasMap = new ExprSubstitutionMap(false);
-        SelectListItem item = new SelectListItem(new SlotRef(TABLE_NAME, "SCHEMA_NAME"), DB_COL);
+        TableName tableName = new TableName(catalogName, InfoSchemaDb.DATABASE_NAME, "schemata");
+        SelectListItem item = new SelectListItem(new SlotRef(tableName, "SCHEMA_NAME"), DB_COL);
         selectList.addItem(item);
         aliasMap.put(new SlotRef(null, DB_COL), item.getExpr().clone(null));
         where = where.substitute(aliasMap);
         selectStmt = new SelectStmt(selectList,
-                new FromClause(Lists.newArrayList(new TableRef(TABLE_NAME, null))),
+                new FromClause(Lists.newArrayList(new TableRef(tableName, null))),
                 where, null, null, null, LimitElement.NO_LIMIT);
-
+        analyzer.setSchemaInfo(null, null, catalogName);
         return selectStmt;
     }
 
@@ -83,6 +95,9 @@ public class ShowDbStmt extends ShowStmt {
         StringBuilder sb = new StringBuilder("SHOW DATABASES");
         if (pattern != null) {
             sb.append(" LIKE '").append(pattern).append("'");
+        }
+        if (!Strings.isNullOrEmpty(catalogName) && !InternalCatalog.INTERNAL_CATALOG_NAME.equals(catalogName)) {
+            sb.append(" FROM ").append(catalogName);
         }
         return sb.toString();
     }

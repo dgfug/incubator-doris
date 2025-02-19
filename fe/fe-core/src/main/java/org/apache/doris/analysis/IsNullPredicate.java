@@ -14,57 +14,75 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/IsNullPredicate.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Function;
+import org.apache.doris.catalog.Function.NullableMode;
 import org.apache.doris.catalog.FunctionSet;
 import org.apache.doris.catalog.ScalarFunction;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.LogManager;
+import com.google.gson.annotations.SerializedName;
 
 public class IsNullPredicate extends Predicate {
-    private static final Logger LOG = LogManager.getLogger(IsNullPredicate.class);
     private static final String IS_NULL = "is_null_pred";
     private static final String IS_NOT_NULL = "is_not_null_pred";
 
     public static void initBuiltins(FunctionSet functionSet) {
-        for (Type t: Type.getSupportedTypes()) {
-            if (t.isNull()) continue;
-            String isNullSymbol;
-            if (t == Type.BOOLEAN) {
-                isNullSymbol = "_ZN5doris15IsNullPredicate7is_nullIN9doris_udf10BooleanValE" +
-                        "EES3_PNS2_15FunctionContextERKT_";
-            } else {
-                String udfType = Function.getUdfType(t.getPrimitiveType());
-                isNullSymbol = "_ZN5doris15IsNullPredicate7is_nullIN9doris_udf" +
-                        udfType.length() + udfType +
-                        "EEENS2_10BooleanValEPNS2_15FunctionContextERKT_";
+        for (Type t : Type.getSupportedTypes()) {
+            if (t.isNull()) {
+                continue;
             }
 
-            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(
-                    IS_NULL, isNullSymbol, Lists.newArrayList(t), Type.BOOLEAN));
+            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(IS_NULL, null,
+                    Lists.newArrayList(t), Type.BOOLEAN, NullableMode.ALWAYS_NOT_NULLABLE));
 
-            String isNotNullSymbol = isNullSymbol.replace("7is_null", "11is_not_null");
-            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(
-                    IS_NOT_NULL, isNotNullSymbol, Lists.newArrayList(t), Type.BOOLEAN));
+            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(IS_NOT_NULL,
+                    null, Lists.newArrayList(t), Type.BOOLEAN, NullableMode.ALWAYS_NOT_NULLABLE));
+        }
+        // for array type
+        for (Type complexType : Lists.newArrayList(Type.ARRAY, Type.MAP, Type.GENERIC_STRUCT)) {
+            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(IS_NULL, null,
+                    Lists.newArrayList(complexType), Type.BOOLEAN, NullableMode.ALWAYS_NOT_NULLABLE));
+
+            functionSet.addBuiltinBothScalaAndVectorized(ScalarFunction.createBuiltinOperator(IS_NOT_NULL, null,
+                    Lists.newArrayList(complexType), Type.BOOLEAN, NullableMode.ALWAYS_NOT_NULLABLE));
         }
     }
 
+    @SerializedName("inn")
+    private boolean isNotNull;
 
-    private final boolean isNotNull;
+    private IsNullPredicate() {
+        // use for serde only
+    }
 
     public IsNullPredicate(Expr e, boolean isNotNull) {
+        this(e, isNotNull, false);
+    }
+
+    /**
+     * use for Nereids ONLY
+     */
+    public IsNullPredicate(Expr e, boolean isNotNull, boolean isNereids) {
         super();
         this.isNotNull = isNotNull;
         Preconditions.checkNotNull(e);
         children.add(e);
+        if (isNereids) {
+            fn = new Function(new FunctionName(isNotNull ? IS_NOT_NULL : IS_NULL),
+                    Lists.newArrayList(e.getType()), Type.BOOLEAN, false, true, NullableMode.ALWAYS_NOT_NULLABLE);
+            Preconditions.checkState(fn != null, "tupleisNull fn == NULL");
+        }
     }
 
     protected IsNullPredicate(IsNullPredicate other) {
@@ -94,6 +112,11 @@ public class IsNullPredicate extends Predicate {
         return getChild(0).toSql() + (isNotNull ? " IS NOT NULL" : " IS NULL");
     }
 
+    @Override
+    public String toDigestImpl() {
+        return getChild(0).toDigest() + (isNotNull ? " IS NOT NULL" : " IS NULL");
+    }
+
     public boolean isSlotRefChildren() {
         return (children.get(0) instanceof SlotRef);
     }
@@ -102,11 +125,9 @@ public class IsNullPredicate extends Predicate {
     public void analyzeImpl(Analyzer analyzer) throws AnalysisException {
         super.analyzeImpl(analyzer);
         if (isNotNull) {
-            fn = getBuiltinFunction(
-                    analyzer, IS_NOT_NULL, collectChildReturnTypes(), Function.CompareMode.IS_INDISTINGUISHABLE);
+            fn = getBuiltinFunction(IS_NOT_NULL, collectChildReturnTypes(), Function.CompareMode.IS_INDISTINGUISHABLE);
         } else {
-            fn = getBuiltinFunction(
-                    analyzer, IS_NULL, collectChildReturnTypes(), Function.CompareMode.IS_INDISTINGUISHABLE);
+            fn = getBuiltinFunction(IS_NULL, collectChildReturnTypes(), Function.CompareMode.IS_INDISTINGUISHABLE);
         }
         Preconditions.checkState(fn != null, "tupleisNull fn == NULL");
 
@@ -132,14 +153,17 @@ public class IsNullPredicate extends Predicate {
     public boolean isNullable() {
         return false;
     }
+
     /**
      * fix issue 6390
      */
     @Override
-    public Expr getResultValue() throws AnalysisException {
-        recursiveResetChildrenResult();
+    public Expr getResultValue(boolean forPushDownPredicatesToView) throws AnalysisException {
+        // Don't push down predicate to view for is null predicate because the value can contain null
+        // after outer join
+        recursiveResetChildrenResult(!forPushDownPredicatesToView);
         final Expr childValue = getChild(0);
-        if(!(childValue instanceof LiteralExpr)) {
+        if (forPushDownPredicatesToView || !(childValue instanceof LiteralExpr)) {
             return this;
         }
         return childValue instanceof NullLiteral ? new BoolLiteral(!isNotNull) : new BoolLiteral(isNotNull);

@@ -19,7 +19,6 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.qe.ShowResultSetMetaData;
@@ -36,7 +35,7 @@ import java.util.List;
 
     where expr: JobName=xxx
  */
-public class ShowRoutineLoadTaskStmt extends ShowStmt {
+public class ShowRoutineLoadTaskStmt extends ShowStmt implements NotFallbackInParser {
     private static final List<String> supportColumn = Arrays.asList("jobname");
     private static final ImmutableList<String> TITLE_NAMES =
             new ImmutableList.Builder<String>()
@@ -83,8 +82,6 @@ public class ShowRoutineLoadTaskStmt extends ShowStmt {
                 throw new AnalysisException("please designate a database in show stmt");
             }
             dbFullName = analyzer.getDefaultDb();
-        } else {
-            dbFullName = ClusterNamespace.getFullName(analyzer.getClusterName(), dbName);
         }
     }
 
@@ -95,7 +92,7 @@ public class ShowRoutineLoadTaskStmt extends ShowStmt {
 
         boolean valid = true;
         CHECK:
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             // check predicate
             if (!(jobNameExpr instanceof BinaryPredicate)) {
                 valid = false;
@@ -124,11 +121,12 @@ public class ShowRoutineLoadTaskStmt extends ShowStmt {
                 break CHECK;
             }
             StringLiteral stringLiteral = (StringLiteral) binaryPredicate.getChild(1);
-            jobName = stringLiteral.getValue().toLowerCase();
-        }
+            jobName = stringLiteral.getValue();
+        } // CHECKSTYLE IGNORE THIS LINE
 
         if (!valid) {
-            throw new AnalysisException("show routine load job only support one equal expr which is sames like JobName=\"ILoveDoris\"");
+            throw new AnalysisException("show routine load job only support one equal expr "
+                    + "which is sames like JobName=\"ILoveDoris\"");
         }
     }
 
@@ -144,5 +142,10 @@ public class ShowRoutineLoadTaskStmt extends ShowStmt {
 
     public static List<String> getTitleNames() {
         return TITLE_NAMES;
+    }
+
+    @Override
+    public RedirectStatus getRedirectStatus() {
+        return RedirectStatus.FORWARD_NO_SYNC;
     }
 }

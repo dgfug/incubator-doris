@@ -1,16 +1,15 @@
 // Copyright 2008 Google Inc.  All rights reserved.
 
-#include <string.h>
+#pragma once
 
+#include <string.h>
 #include <string>
+
 using std::string;
 
-#include "gutil/basictypes.h"
 #include "gutil/strings/numbers.h"
 #include "gutil/strings/stringpiece.h"
-
-#ifndef STRINGS_SUBSTITUTE_H_
-#define STRINGS_SUBSTITUTE_H_
+#include "gutil/stringprintf.h"
 
 namespace strings {
 
@@ -132,7 +131,7 @@ public:
 private:
     inline SubstituteArg() : text_(NULL), size_(-1) {}
 
-    const char* text_;
+    const char* text_ = nullptr;
     int size_;
     char scratch_[kFastToBufferSize];
 };
@@ -179,5 +178,3 @@ inline string Substitute(StringPiece format,
 }
 
 } // namespace strings
-
-#endif // STRINGS_SUBSTITUTE_H_

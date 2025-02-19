@@ -20,7 +20,6 @@ package org.apache.doris.task;
 import org.apache.doris.common.ThreadPoolManager;
 
 import com.google.common.collect.Maps;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -36,24 +35,33 @@ import java.util.concurrent.TimeUnit;
 public class MasterTaskExecutor {
     private static final Logger LOG = LogManager.getLogger(MasterTaskExecutor.class);
 
-    private ThreadPoolExecutor executor;
-    private Map<Long, Future<?>> runningTasks;
-    public ScheduledThreadPoolExecutor scheduledThreadPool;
+    protected ThreadPoolExecutor executor;
+    protected Map<Long, Future<?>> runningTasks;
+    protected ScheduledThreadPoolExecutor scheduledThreadPool;
+
+    protected MasterTaskExecutor(String name, boolean needRegisterMetric) {
+        runningTasks = Maps.newHashMap();
+        scheduledThreadPool = ThreadPoolManager.newDaemonScheduledThreadPool(1,
+                name + "_scheduler_thread_pool", needRegisterMetric);
+    }
 
     public MasterTaskExecutor(String name, int threadNum, boolean needRegisterMetric) {
-        executor = ThreadPoolManager.newDaemonFixedThreadPool(threadNum, threadNum * 2, name + "_pool", needRegisterMetric);
+        executor = ThreadPoolManager.newDaemonFixedThreadPool(threadNum, threadNum * 2, name + "-pool",
+                needRegisterMetric);
         runningTasks = Maps.newHashMap();
-        scheduledThreadPool = ThreadPoolManager.newDaemonScheduledThreadPool(1, name + "_scheduler_thread_pool", needRegisterMetric);
+        scheduledThreadPool = ThreadPoolManager.newDaemonScheduledThreadPool(1, name + "-scheduler-thread-pool",
+                needRegisterMetric);
     }
 
     public MasterTaskExecutor(String name, int threadNum, int queueSize, boolean needRegisterMetric) {
-        executor = ThreadPoolManager.newDaemonFixedThreadPool(threadNum, queueSize, name + "_pool", needRegisterMetric);
+        executor = ThreadPoolManager.newDaemonFixedThreadPool(threadNum, queueSize, name + "-pool", needRegisterMetric);
         runningTasks = Maps.newHashMap();
-        scheduledThreadPool = ThreadPoolManager.newDaemonScheduledThreadPool(1, name + "_scheduler_thread_pool", needRegisterMetric);
+        scheduledThreadPool = ThreadPoolManager.newDaemonScheduledThreadPool(1, name + "-scheduler-thread-pool",
+                needRegisterMetric);
     }
 
-    public boolean isTaskQueueFull() {
-        return executor.getQueue().remainingCapacity() == 0;
+    public boolean hasIdleThread() {
+        return executor.getActiveCount() < executor.getMaximumPoolSize();
     }
 
     public void start() {
@@ -63,7 +71,7 @@ public class MasterTaskExecutor {
     /**
      * submit task to task executor
      * @param task
-     * @return true if submit success 
+     * @return true if submit success
      *         false if task exists
      */
     public boolean submit(MasterTask task) {
@@ -77,13 +85,13 @@ public class MasterTaskExecutor {
             return true;
         }
     }
-    
+
     public void close() {
         scheduledThreadPool.shutdown();
         executor.shutdown();
         runningTasks.clear();
     }
-    
+
     public int getTaskNum() {
         synchronized (runningTasks) {
             return runningTasks.size();

@@ -21,16 +21,16 @@ import org.apache.doris.alter.AlterJobV2;
 import org.apache.doris.analysis.AlterTableStmt;
 import org.apache.doris.analysis.CreateDbStmt;
 import org.apache.doris.analysis.CreateTableStmt;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.DiskInfo;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.MaterializedIndexMeta;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.TabletMeta;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.UserException;
 import org.apache.doris.common.proc.BackendsProcDir;
 import org.apache.doris.common.proc.ProcResult;
 import org.apache.doris.planner.OlapScanNode;
@@ -38,8 +38,8 @@ import org.apache.doris.planner.PlanFragment;
 import org.apache.doris.planner.Planner;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.StmtExecutor;
+import org.apache.doris.resource.Tag;
 import org.apache.doris.system.Backend;
-import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TDisk;
 import org.apache.doris.thrift.TStorageMedium;
 import org.apache.doris.utframe.MockedFrontend.EnvVarNotSetException;
@@ -50,7 +50,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Table;
-
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -81,16 +80,16 @@ public class DemoMultiBackendsTest {
 
     @BeforeClass
     public static void beforeClass() throws EnvVarNotSetException, IOException,
-            FeStartException, NotInitException, DdlException, InterruptedException {
+            FeStartException, NotInitException, UserException, InterruptedException {
         FeConstants.runningUnitTest = true;
-        FeConstants.tablet_checker_interval_ms = 1000;
         FeConstants.default_scheduler_interval_millisecond = 100;
+        Config.tablet_checker_interval_ms = 1000;
         Config.tablet_repair_delay_factor_second = 1;
 
         UtFrameUtils.createDorisClusterWithMultiTag(runningDir, 3);
 
         // must set disk info, or the tablet scheduler won't work
-        backends = Catalog.getCurrentSystemInfo().getClusterBackends(SystemInfoService.DEFAULT_CLUSTER);
+        backends = Env.getCurrentSystemInfo().getAllBackendsByAllCluster().values().asList();
         for (Backend be : backends) {
             Map<String, TDisk> backendDisks = Maps.newHashMap();
             TDisk tDisk1 = new TDisk();
@@ -118,7 +117,7 @@ public class DemoMultiBackendsTest {
     }
 
     @AfterClass
-    public static void TearDown() {
+    public static void tearDown() {
         UtFrameUtils.cleanDorisFeDir(runningDirBase);
     }
 
@@ -126,21 +125,23 @@ public class DemoMultiBackendsTest {
     public void testCreateDbAndTable() throws Exception {
         // 1. create connect context
         ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        ctx.getSessionVariable().setParallelResultSink(false);
         // 2. create database db1
         String createDbStmtStr = "create database db1;";
         CreateDbStmt createDbStmt = (CreateDbStmt) UtFrameUtils.parseAndAnalyzeStmt(createDbStmtStr, ctx);
-        Catalog.getCurrentCatalog().createDb(createDbStmt);
-        System.out.println(Catalog.getCurrentCatalog().getDbNames());
+        Env.getCurrentEnv().createDb(createDbStmt);
+        System.out.println(Env.getCurrentInternalCatalog().getDbNames());
         // 3. create table tbl1
-        String createTblStmtStr = "create table db1.tbl1(k1 int) distributed by hash(k1) buckets 3 properties('replication_num' = '3'," +
-                "'colocate_with' = 'g1');";
+        String createTblStmtStr = "create table db1.tbl1(k1 int) distributed by hash(k1) buckets 3"
+                + " properties('replication_num' = '3',"
+                + "'colocate_with' = 'g1');";
         CreateTableStmt createTableStmt = (CreateTableStmt) UtFrameUtils.parseAndAnalyzeStmt(createTblStmtStr, ctx);
-        Catalog.getCurrentCatalog().createTable(createTableStmt);
+        Env.getCurrentEnv().createTable(createTableStmt);
         // must set replicas' path hash, or the tablet scheduler won't work
         updateReplicaPathHash();
 
         // 4. get and test the created db and table
-        Database db = Catalog.getCurrentCatalog().getDbNullable("default_cluster:db1");
+        Database db = Env.getCurrentInternalCatalog().getDbNullable("db1");
         Assert.assertNotNull(db);
         OlapTable tbl = (OlapTable) db.getTableNullable("tbl1");
         tbl.readLock();
@@ -155,9 +156,9 @@ public class DemoMultiBackendsTest {
         // 5. process a schema change job
         String alterStmtStr = "alter table db1.tbl1 add column k2 int default '1'";
         AlterTableStmt alterTableStmt = (AlterTableStmt) UtFrameUtils.parseAndAnalyzeStmt(alterStmtStr, ctx);
-        Catalog.getCurrentCatalog().getAlterInstance().processAlterTable(alterTableStmt);
+        Env.getCurrentEnv().getAlterInstance().processAlterTable(alterTableStmt);
         // 6. check alter job
-        Map<Long, AlterJobV2> alterJobs = Catalog.getCurrentCatalog().getSchemaChangeHandler().getAlterJobsV2();
+        Map<Long, AlterJobV2> alterJobs = Env.getCurrentEnv().getSchemaChangeHandler().getAlterJobsV2();
         Assert.assertEquals(1, alterJobs.size());
         for (AlterJobV2 alterJobV2 : alterJobs.values()) {
             while (!alterJobV2.getJobState().isFinalState()) {
@@ -195,24 +196,29 @@ public class DemoMultiBackendsTest {
         Assert.assertEquals(0, fragment.getChildren().size());
 
         // test show backends;
-        BackendsProcDir dir = new BackendsProcDir(Catalog.getCurrentSystemInfo());
+        BackendsProcDir dir = new BackendsProcDir(Env.getCurrentSystemInfo());
         ProcResult result = dir.fetchResult();
         Assert.assertEquals(BackendsProcDir.TITLE_NAMES.size(), result.getColumnNames().size());
-        Assert.assertEquals("{\"location\" : \"default\"}", result.getRows().get(0).get(19));
-        Assert.assertEquals("{\"lastSuccessReportTabletsTime\":\"N/A\",\"lastStreamLoadTime\":-1}",
-                result.getRows().get(0).get(BackendsProcDir.TITLE_NAMES.size() - 1));
+        Assert.assertEquals("{\"location\" : \"default\"}",
+                result.getRows().get(0).get(BackendsProcDir.TITLE_NAMES.size() - 8));
+        Assert.assertEquals(
+                "{\"lastSuccessReportTabletsTime\":\"N/A\",\"lastStreamLoadTime\":-1,\"isQueryDisabled\":false,"
+                        + "\"isLoadDisabled\":false,\"isActive\":true,\"currentFragmentNum\":0,\"lastFragmentUpdateTime\":0}",
+                result.getRows().get(0).get(BackendsProcDir.TITLE_NAMES.size() - 5));
+        Assert.assertEquals("0", result.getRows().get(0).get(BackendsProcDir.TITLE_NAMES.size() - 4));
+        Assert.assertEquals(Tag.VALUE_MIX, result.getRows().get(0).get(BackendsProcDir.TITLE_NAMES.size() - 3));
     }
 
     private static void updateReplicaPathHash() {
-        Table<Long, Long, Replica> replicaMetaTable = Catalog.getCurrentInvertedIndex().getReplicaMetaTable();
+        Table<Long, Long, Replica> replicaMetaTable = Env.getCurrentInvertedIndex().getReplicaMetaTable();
         for (Table.Cell<Long, Long, Replica> cell : replicaMetaTable.cellSet()) {
             long beId = cell.getColumnKey();
-            Backend be = Catalog.getCurrentSystemInfo().getBackend(beId);
+            Backend be = Env.getCurrentSystemInfo().getBackend(beId);
             if (be == null) {
                 continue;
             }
             Replica replica = cell.getValue();
-            TabletMeta tabletMeta = Catalog.getCurrentInvertedIndex().getTabletMeta(cell.getRowKey());
+            TabletMeta tabletMeta = Env.getCurrentInvertedIndex().getTabletMeta(cell.getRowKey());
             ImmutableMap<String, DiskInfo> diskMap = be.getDisks();
             for (DiskInfo diskInfo : diskMap.values()) {
                 if (diskInfo.getStorageMedium() == tabletMeta.getStorageMedium()) {
@@ -223,4 +229,3 @@ public class DemoMultiBackendsTest {
         }
     }
 }
-

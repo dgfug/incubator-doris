@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_UTIL_BFD_PARSER_H
-#define DORIS_BE_SRC_UTIL_BFD_PARSER_H
+#pragma once
 
 #ifndef PACKAGE
 #define PACKAGE
@@ -67,12 +66,10 @@ private:
 
     std::string _file_name;
     std::mutex _mutex;
-    bfd* _abfd;
-    bfd_symbol** _syms;
+    bfd* _abfd = nullptr;
+    bfd_symbol** _syms = nullptr;
     long _num_symbols;
     unsigned int _symbol_size;
 };
 
 } // namespace doris
-
-#endif

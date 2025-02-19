@@ -31,18 +31,17 @@ import org.apache.doris.utframe.DorisAssert;
 import org.apache.doris.utframe.UtFrameUtils;
 
 import com.google.common.collect.Lists;
-
-import java.io.StringReader;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
-
 import mockit.Expectations;
 import mockit.Injectable;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
-import org.junit.Test;
+
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 
 public class InsertStmtTest {
     private static String runningDir = "fe/mocked/DemoTest/" + UUID.randomUUID().toString() + "/";
@@ -62,7 +61,7 @@ public class InsertStmtTest {
         dorisAssert.withDatabase("db").useDatabase("db");
         dorisAssert.withTable(createTblStmtStr);
 
-        ConnectContext ctx = UtFrameUtils.createDefaultCtx();
+        UtFrameUtils.createDefaultCtx();
     }
 
     List<Column> getBaseSchema() {
@@ -127,7 +126,7 @@ public class InsertStmtTest {
         v3.setIsAllowNull(false);
         ArrayList<Expr> params = new ArrayList<>();
 
-        SlotRef slotRef = new SlotRef(null , "k1");
+        SlotRef slotRef = new SlotRef(null, "k1");
         slotRef.setType(Type.BIGINT);
         params.add(slotRef.uncheckedCastTo(Type.VARCHAR));
 
@@ -149,18 +148,21 @@ public class InsertStmtTest {
     }
 
 
-    @Injectable InsertTarget target;
-    @Injectable InsertSource source;
-    @Injectable Table targetTable;
+    @Injectable
+    InsertTarget target;
+    @Injectable
+    InsertSource source;
+    @Injectable
+    Table targetTable;
 
-    @Test
     public void testNormal() throws Exception {
         ConnectContext ctx = UtFrameUtils.createDefaultCtx();
         String sql = "values(1,'a',2,'b')";
 
-        SqlScanner input = new SqlScanner(new StringReader(sql), ctx.getSessionVariable().getSqlMode());
-        SqlParser parser = new SqlParser(input);
-        Analyzer analyzer = new Analyzer(ctx.getCatalog(), ctx);
+        org.apache.doris.analysis.SqlScanner input = new org.apache.doris.analysis.SqlScanner(new StringReader(sql),
+                ctx.getSessionVariable().getSqlMode());
+        org.apache.doris.analysis.SqlParser parser = new org.apache.doris.analysis.SqlParser(input);
+        Analyzer analyzer = new Analyzer(ctx.getEnv(), ctx);
         StatementBase statementBase = null;
         try {
             statementBase = SqlParserUtils.getFirstStmt(parser);
@@ -177,48 +179,61 @@ public class InsertStmtTest {
 
         QueryStmt queryStmt = (QueryStmt) statementBase;
 
-        new Expectations() {{
-            targetTable.getBaseSchema(); result = getBaseSchema();
-            targetTable.getBaseSchema(anyBoolean); result = getBaseSchema();
-            targetTable.getFullSchema(); result = getFullSchema();
-        }};
+        new Expectations() {
+            {
+                targetTable.getBaseSchema();
+                result = getBaseSchema();
+                targetTable.getFullSchema();
+                result = getFullSchema();
+                targetTable.getColumn("k1");
+                result = getBaseSchema().get(0);
+                targetTable.getColumn("k2");
+                result = getBaseSchema().get(1);
+                targetTable.getColumn("v1");
+                result = getBaseSchema().get(2);
+                targetTable.getColumn("v2");
+                result = getBaseSchema().get(3);
+            }
+        };
 
+        List<String> cols = Arrays.asList("k1", "k2", "v1", "v2");
 
-        InsertStmt stmt = new InsertStmt(target, "label", null, source, new ArrayList<>());
+        InsertStmt stmt = new NativeInsertStmt(target, "label", cols, source, new ArrayList<>());
         stmt.setTargetTable(targetTable);
         stmt.setQueryStmt(queryStmt);
 
-        Deencapsulation.invoke(stmt, "analyzeSubquery", analyzer);
-        System.out.println(stmt.getQueryStmt());
+        Deencapsulation.invoke(stmt, "analyzeSubquery", analyzer, false);
+        System.out.println(stmt.getQueryStmt().toSql());
 
         QueryStmt queryStmtSubstitute = stmt.getQueryStmt();
         Assert.assertEquals(6, queryStmtSubstitute.getResultExprs().size());
 
         Assert.assertTrue(queryStmtSubstitute.getResultExprs().get(4) instanceof FunctionCallExpr);
         FunctionCallExpr expr4 = (FunctionCallExpr) queryStmtSubstitute.getResultExprs().get(4);
-        Assert.assertTrue(expr4.getFnName().getFunction().equals("to_bitmap"));
+        Assert.assertEquals(expr4.getFnName().getFunction(), "to_bitmap");
         List<Expr> slots = Lists.newArrayList();
         expr4.collect(IntLiteral.class, slots);
-        Assert.assertEquals(1, slots.size());
-        Assert.assertEquals(queryStmtSubstitute.getResultExprs().get(0), slots.get(0));
+        Assert.assertEquals(expr4.toSql(), 1, slots.size());
+        Assert.assertEquals(queryStmtSubstitute.getResultExprs().get(0).getStringValue(),
+                slots.get(0).getStringValue());
 
         Assert.assertTrue(queryStmtSubstitute.getResultExprs().get(5) instanceof FunctionCallExpr);
         FunctionCallExpr expr5 = (FunctionCallExpr) queryStmtSubstitute.getResultExprs().get(5);
-        Assert.assertTrue(expr5.getFnName().getFunction().equals("hll_hash"));
+        Assert.assertEquals(expr5.getFnName().getFunction(), "hll_hash");
         slots = Lists.newArrayList();
         expr5.collect(StringLiteral.class, slots);
         Assert.assertEquals(1, slots.size());
         Assert.assertEquals(queryStmtSubstitute.getResultExprs().get(1), slots.get(0));
     }
 
-    @Test
     public void testInsertSelect() throws Exception {
         ConnectContext ctx = UtFrameUtils.createDefaultCtx();
         String sql = "select kk1, kk2, kk3, kk4 from db.tbl";
 
-        SqlScanner input = new SqlScanner(new StringReader(sql), ctx.getSessionVariable().getSqlMode());
-        SqlParser parser = new SqlParser(input);
-        Analyzer analyzer = new Analyzer(ctx.getCatalog(), ctx);
+        org.apache.doris.analysis.SqlScanner input = new org.apache.doris.analysis.SqlScanner(new StringReader(sql),
+                ctx.getSessionVariable().getSqlMode());
+        org.apache.doris.analysis.SqlParser parser = new org.apache.doris.analysis.SqlParser(input);
+        Analyzer analyzer = new Analyzer(ctx.getEnv(), ctx);
         StatementBase statementBase = null;
         try {
             statementBase = SqlParserUtils.getFirstStmt(parser);
@@ -235,18 +250,30 @@ public class InsertStmtTest {
 
         QueryStmt queryStmt = (QueryStmt) statementBase;
 
-        new Expectations() {{
-            targetTable.getBaseSchema(); result = getBaseSchema();
-            targetTable.getBaseSchema(anyBoolean); result = getBaseSchema();
-            targetTable.getFullSchema(); result = getFullSchema();
-        }};
+        new Expectations() {
+            {
+                targetTable.getBaseSchema();
+                result = getBaseSchema();
+                targetTable.getFullSchema();
+                result = getFullSchema();
+                targetTable.getColumn("k1");
+                result = getBaseSchema().get(0);
+                targetTable.getColumn("k2");
+                result = getBaseSchema().get(1);
+                targetTable.getColumn("v1");
+                result = getBaseSchema().get(2);
+                targetTable.getColumn("v2");
+                result = getBaseSchema().get(3);
+            }
+        };
 
+        List<String> cols = Arrays.asList("k1", "k2", "v1", "v2");
 
-        InsertStmt stmt = new InsertStmt(target, "label", null, source, new ArrayList<>());
+        InsertStmt stmt = new NativeInsertStmt(target, "label", cols, source, new ArrayList<>());
         stmt.setTargetTable(targetTable);
         stmt.setQueryStmt(queryStmt);
 
-        Deencapsulation.invoke(stmt, "analyzeSubquery", analyzer);
+        Deencapsulation.invoke(stmt, "analyzeSubquery", analyzer, false);
         System.out.println(stmt.getQueryStmt());
 
         QueryStmt queryStmtSubstitue = stmt.getQueryStmt();
@@ -254,7 +281,7 @@ public class InsertStmtTest {
 
         Assert.assertTrue(queryStmtSubstitue.getResultExprs().get(4) instanceof FunctionCallExpr);
         FunctionCallExpr expr4 = (FunctionCallExpr) queryStmtSubstitue.getResultExprs().get(4);
-        Assert.assertTrue(expr4.getFnName().getFunction().equals("to_bitmap"));
+        Assert.assertEquals(expr4.getFnName().getFunction(), "to_bitmap");
         List<Expr> slots = Lists.newArrayList();
         expr4.collect(SlotRef.class, slots);
         Assert.assertEquals(1, slots.size());
@@ -264,7 +291,7 @@ public class InsertStmtTest {
 
         Assert.assertTrue(queryStmtSubstitue.getResultExprs().get(5) instanceof FunctionCallExpr);
         FunctionCallExpr expr5 = (FunctionCallExpr) queryStmtSubstitue.getResultExprs().get(5);
-        Assert.assertTrue(expr5.getFnName().getFunction().equals("hll_hash"));
+        Assert.assertEquals(expr5.getFnName().getFunction(), "hll_hash");
         slots = Lists.newArrayList();
         expr5.collect(SlotRef.class, slots);
         Assert.assertEquals(1, slots.size());

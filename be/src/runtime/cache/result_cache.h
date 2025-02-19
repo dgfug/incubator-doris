@@ -15,37 +15,29 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_RESULT_CACHE_H
-#define DORIS_BE_SRC_RUNTIME_RESULT_CACHE_H
+#pragma once
 
-#include <boost/thread.hpp>
-#include <cassert>
 #include <cstdio>
-#include <cstdlib>
-#include <exception>
-#include <iostream>
-#include <list>
-#include <map>
-#include <mutex>
 #include <shared_mutex>
-#include <thread>
+#include <unordered_map>
 
-#include "common/config.h"
-#include "runtime/cache/cache_utils.h"
+#include "gutil/integral_types.h"
 #include "runtime/cache/result_node.h"
-#include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
-#include "runtime/row_batch.h"
-#include "runtime/tuple_row.h"
+#include "util/uid_util.h"
 
 namespace doris {
+class PCacheResponse;
+class PClearCacheRequest;
+class PFetchCacheRequest;
+class PFetchCacheResult;
+class PUpdateCacheRequest;
 
 typedef std::unordered_map<UniqueId, ResultNode*> ResultNodeMap;
 
 // a doubly linked list class, point to result node
 class ResultNodeList {
 public:
-    ResultNodeList() : _head(NULL), _tail(NULL), _node_count(0) {}
+    ResultNodeList() : _head(nullptr), _tail(nullptr), _node_count(0) {}
     virtual ~ResultNodeList() {}
 
     ResultNode* new_node(const UniqueId& sql_key) { return new ResultNode(sql_key); }
@@ -66,8 +58,8 @@ public:
     size_t get_node_count() const { return _node_count; }
 
 private:
-    ResultNode* _head;
-    ResultNode* _tail;
+    ResultNode* _head = nullptr;
+    ResultNode* _tail = nullptr;
     size_t _node_count;
 };
 
@@ -80,8 +72,8 @@ private:
 class ResultCache {
 public:
     ResultCache(int32 max_size, int32 elasticity_size) {
-        _max_size = max_size * 1024 * 1024;
-        _elasticity_size = elasticity_size * 1024 * 1024;
+        _max_size = static_cast<size_t>(max_size) * 1024 * 1024;
+        _elasticity_size = static_cast<size_t>(elasticity_size) * 1024 * 1024;
         _cache_size = 0;
         _node_count = 0;
         _partition_count = 0;
@@ -119,4 +111,3 @@ private:
 };
 
 } // namespace doris
-#endif

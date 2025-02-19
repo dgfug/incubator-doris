@@ -17,13 +17,19 @@
 
 #include "runtime/external_scan_context_mgr.h"
 
-#include <chrono>
-#include <functional>
+#include <glog/logging.h>
+// IWYU pragma: no_include <bits/chrono.h>
+#include <chrono> // IWYU pragma: keep
+#include <ostream>
 #include <vector>
 
+#include "common/config.h"
+#include "runtime/exec_env.h"
 #include "runtime/fragment_mgr.h"
 #include "runtime/result_queue_mgr.h"
 #include "util/doris_metrics.h"
+#include "util/metrics.h"
+#include "util/thread.h"
 #include "util/uid_util.h"
 
 namespace doris {
@@ -39,12 +45,12 @@ ExternalScanContextMgr::ExternalScanContextMgr(ExecEnv* exec_env)
                   .ok());
 
     REGISTER_HOOK_METRIC(active_scan_context_count, [this]() {
-        std::lock_guard<std::mutex> l(_lock);
+        // std::lock_guard<std::mutex> l(_lock);
         return _active_contexts.size();
     });
 }
 
-ExternalScanContextMgr::~ExternalScanContextMgr() {
+void ExternalScanContextMgr::stop() {
     DEREGISTER_HOOK_METRIC(active_scan_context_count);
     _stop_background_threads_latch.count_down();
     if (_keep_alive_reaper) {
@@ -55,7 +61,7 @@ ExternalScanContextMgr::~ExternalScanContextMgr() {
 Status ExternalScanContextMgr::create_scan_context(std::shared_ptr<ScanContext>* p_context) {
     std::string context_id = generate_uuid_string();
     std::shared_ptr<ScanContext> context(new ScanContext(context_id));
-    // context->last_access_time  = time(NULL);
+    // context->last_access_time  = time(nullptr);
     {
         std::lock_guard<std::mutex> l(_lock);
         _active_contexts.insert(std::make_pair(context_id, context));
@@ -90,16 +96,17 @@ Status ExternalScanContextMgr::clear_scan_context(const std::string& context_id)
             context = iter->second;
             if (context == nullptr) {
                 _active_contexts.erase(context_id);
-                Status::OK();
+                return Status::OK();
             }
             iter = _active_contexts.erase(iter);
         }
     }
     if (context != nullptr) {
         // first cancel the fragment instance, just ignore return status
-        _exec_env->fragment_mgr()->cancel(context->fragment_instance_id);
+        _exec_env->fragment_mgr()->cancel_query(context->query_id,
+                                                Status::InternalError("cancelled by clear thread"));
         // clear the fragment instance's related result queue
-        _exec_env->result_queue_mgr()->cancel(context->fragment_instance_id);
+        static_cast<void>(_exec_env->result_queue_mgr()->cancel(context->fragment_instance_id));
         LOG(INFO) << "close scan context: context id [ " << context_id << " ]";
     }
     return Status::OK();
@@ -108,8 +115,8 @@ Status ExternalScanContextMgr::clear_scan_context(const std::string& context_id)
 void ExternalScanContextMgr::gc_expired_context() {
 #ifndef BE_TEST
     while (!_stop_background_threads_latch.wait_for(
-            MonoDelta::FromSeconds(doris::config::scan_context_gc_interval_min * 60))) {
-        time_t current_time = time(NULL);
+            std::chrono::seconds(doris::config::scan_context_gc_interval_min * 60))) {
+        time_t current_time = time(nullptr);
         std::vector<std::shared_ptr<ScanContext>> expired_contexts;
         {
             std::lock_guard<std::mutex> l(_lock);
@@ -137,8 +144,10 @@ void ExternalScanContextMgr::gc_expired_context() {
         }
         for (auto expired_context : expired_contexts) {
             // must cancel the fragment instance, otherwise return thrift transport TTransportException
-            _exec_env->fragment_mgr()->cancel(expired_context->fragment_instance_id);
-            _exec_env->result_queue_mgr()->cancel(expired_context->fragment_instance_id);
+            _exec_env->fragment_mgr()->cancel_query(
+                    expired_context->query_id, Status::InternalError("scan context is expired"));
+            static_cast<void>(
+                    _exec_env->result_queue_mgr()->cancel(expired_context->fragment_instance_id));
         }
     }
 #endif

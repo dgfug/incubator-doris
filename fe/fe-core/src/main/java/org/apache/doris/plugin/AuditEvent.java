@@ -17,13 +17,14 @@
 
 package org.apache.doris.plugin;
 
+
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
 /*
  * AuditEvent contains all information about audit log info.
  * It should be created by AuditEventBuilder. For example:
- * 
+ *
  *      AuditEvent event = new AuditEventBuilder()
  *          .setEventType(AFTER_QUERY)
  *          .setClientIp(xxx)
@@ -55,11 +56,19 @@ public class AuditEvent {
     public String clientIp = "";
     @AuditField(value = "User")
     public String user = "";
+    @AuditField(value = "Ctl")
+    public String ctl = "";
     @AuditField(value = "Db")
     public String db = "";
+    @AuditField(value = "CommandType")
+    public String commandType = "";
     @AuditField(value = "State")
     public String state = "";
-    @AuditField(value = "Time")
+    @AuditField(value = "ErrorCode")
+    public int errorCode = 0;
+    @AuditField(value = "ErrorMessage")
+    public String errorMessage = "";
+    @AuditField(value = "Time(ms)")
     public long queryTime = -1;
     @AuditField(value = "ScanBytes")
     public long scanBytes = -1;
@@ -73,14 +82,39 @@ public class AuditEvent {
     public String queryId = "";
     @AuditField(value = "IsQuery")
     public boolean isQuery = false;
-    @AuditField(value = "feIp")
+    @AuditField(value = "IsNereids")
+    public boolean isNereids = false;
+    @AuditField(value = "FeIp")
     public String feIp = "";
+    @AuditField(value = "StmtType")
+    public String stmtType = "";
     @AuditField(value = "Stmt")
     public String stmt = "";
     @AuditField(value = "CpuTimeMS")
     public long cpuTimeMs = -1;
+    @AuditField(value = "ShuffleSendBytes")
+    public long shuffleSendBytes = -1;
+    @AuditField(value = "ShuffleSendRows")
+    public long shuffleSendRows = -1;
     @AuditField(value = "SqlHash")
     public String sqlHash = "";
+    @AuditField(value = "PeakMemoryBytes")
+    public long peakMemoryBytes = -1;
+    @AuditField(value = "SqlDigest")
+    public String sqlDigest = "";
+    @AuditField(value = "ComputeGroupName")
+    public String cloudClusterName = "";
+    @AuditField(value = "WorkloadGroup")
+    public String workloadGroup = "";
+    // note: newly added fields should be always before fuzzyVariables
+    @AuditField(value = "FuzzyVariables")
+    public String fuzzyVariables = "";
+    @AuditField(value = "ScanBytesFromLocalStorage")
+    public long scanBytesFromLocalStorage = -1;
+    @AuditField(value = "ScanBytesFromRemoteStorage")
+    public long scanBytesFromRemoteStorage = -1;
+
+    public long pushToAuditLogQueueTime;
 
     public static class AuditEventBuilder {
 
@@ -113,13 +147,33 @@ public class AuditEvent {
             return this;
         }
 
+        public AuditEventBuilder setCtl(String ctl) {
+            auditEvent.ctl = ctl;
+            return this;
+        }
+
         public AuditEventBuilder setDb(String db) {
             auditEvent.db = db;
             return this;
         }
 
+        public AuditEventBuilder setCloudCluster(String cloudClusterName) {
+            auditEvent.cloudClusterName = cloudClusterName;
+            return this;
+        }
+
         public AuditEventBuilder setState(String state) {
             auditEvent.state = state;
+            return this;
+        }
+
+        public AuditEventBuilder setErrorCode(int errorCode) {
+            auditEvent.errorCode = errorCode;
+            return this;
+        }
+
+        public AuditEventBuilder setErrorMessage(String errorMessage) {
+            auditEvent.errorMessage = errorMessage;
             return this;
         }
 
@@ -135,6 +189,11 @@ public class AuditEvent {
 
         public AuditEventBuilder setCpuTimeMs(long cpuTimeMs) {
             auditEvent.cpuTimeMs = cpuTimeMs;
+            return this;
+        }
+
+        public AuditEventBuilder setPeakMemoryBytes(long peakMemoryBytes) {
+            auditEvent.peakMemoryBytes = peakMemoryBytes;
             return this;
         }
 
@@ -163,8 +222,18 @@ public class AuditEvent {
             return this;
         }
 
+        public AuditEventBuilder setIsNereids(boolean isNereids) {
+            auditEvent.isNereids = isNereids;
+            return this;
+        }
+
         public AuditEventBuilder setFeIp(String feIp) {
             auditEvent.feIp = feIp;
+            return this;
+        }
+
+        public AuditEventBuilder setStmtType(String stmtType) {
+            auditEvent.stmtType = stmtType;
             return this;
         }
 
@@ -175,6 +244,36 @@ public class AuditEvent {
 
         public AuditEventBuilder setSqlHash(String sqlHash) {
             auditEvent.sqlHash = sqlHash;
+            return this;
+        }
+
+        public AuditEventBuilder setSqlDigest(String sqlDigest) {
+            auditEvent.sqlDigest = sqlDigest;
+            return this;
+        }
+
+        public AuditEventBuilder setFuzzyVariables(String variables) {
+            auditEvent.fuzzyVariables = variables;
+            return this;
+        }
+
+        public AuditEventBuilder setWorkloadGroup(String workloadGroup) {
+            auditEvent.workloadGroup = workloadGroup;
+            return this;
+        }
+
+        public AuditEventBuilder setScanBytesFromLocalStorage(long scanBytesFromLocalStorage) {
+            auditEvent.scanBytesFromLocalStorage = scanBytesFromLocalStorage;
+            return this;
+        }
+
+        public AuditEventBuilder setScanBytesFromRemoteStorage(long scanBytesFromRemoteStorage) {
+            auditEvent.scanBytesFromRemoteStorage = scanBytesFromRemoteStorage;
+            return this;
+        }
+
+        public AuditEventBuilder setCommandType(String commandType) {
+            auditEvent.commandType = commandType;
             return this;
         }
 

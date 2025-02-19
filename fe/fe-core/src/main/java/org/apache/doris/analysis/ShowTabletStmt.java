@@ -17,17 +17,17 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.proc.TabletsProcDir;
 import org.apache.doris.common.util.OrderByPair;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
@@ -37,7 +37,8 @@ import com.google.common.base.Strings;
 import java.util.ArrayList;
 import java.util.List;
 
-public class ShowTabletStmt extends ShowStmt {
+public class ShowTabletStmt extends ShowStmt implements NotFallbackInParser {
+    private TableName dbTableName;
     private String dbName;
     private String tableName;
     private long tabletId;
@@ -55,11 +56,12 @@ public class ShowTabletStmt extends ShowStmt {
     private boolean isShowSingleTablet;
 
     public ShowTabletStmt(TableName dbTableName, long tabletId) {
-        this(dbTableName, tabletId, null, null, null,null);
+        this(dbTableName, tabletId, null, null, null, null);
     }
 
     public ShowTabletStmt(TableName dbTableName, long tabletId, PartitionNames partitionNames,
             Expr whereClause, List<OrderByElement> orderByElements, LimitElement limitElement) {
+        this.dbTableName = dbTableName;
         if (dbTableName == null) {
             this.dbName = null;
             this.tableName = null;
@@ -100,43 +102,68 @@ public class ShowTabletStmt extends ShowStmt {
         return isShowSingleTablet;
     }
 
-    public boolean hasOffset() { return limitElement != null && limitElement.hasOffset(); }
+    public boolean hasOffset() {
+        return limitElement != null && limitElement.hasOffset();
+    }
 
-    public long getOffset() { return limitElement.getOffset(); }
+    public long getOffset() {
+        return limitElement.getOffset();
+    }
 
-    public boolean hasPartition() { return partitionNames != null; }
+    public boolean hasPartition() {
+        return partitionNames != null;
+    }
 
-    public PartitionNames getPartitionNames() { return partitionNames; }
-    
-    public boolean hasLimit() { return limitElement != null && limitElement.hasLimit(); }
+    public PartitionNames getPartitionNames() {
+        return partitionNames;
+    }
 
-    public long getLimit() { return  limitElement.getLimit(); }
+    public boolean hasLimit() {
+        return limitElement != null && limitElement.hasLimit();
+    }
 
-    public long getVersion() { return version; }
+    public long getLimit() {
+        return limitElement.getLimit();
+    }
 
-    public long getBackendId() { return backendId; }
+    public long getVersion() {
+        return version;
+    }
 
-    public String getIndexName() { return indexName; }
+    public long getBackendId() {
+        return backendId;
+    }
 
-    public List<OrderByPair> getOrderByPairs() { return orderByPairs; }
+    public String getIndexName() {
+        return indexName;
+    }
 
-    public Replica.ReplicaState getReplicaState() { return  replicaState; }
+    public List<OrderByPair> getOrderByPairs() {
+        return orderByPairs;
+    }
+
+    public Replica.ReplicaState getReplicaState() {
+        return replicaState;
+    }
 
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
         // check access first
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "SHOW TABLET");
         }
 
         super.analyze(analyzer);
+        if (dbTableName != null) {
+            dbTableName.analyze(analyzer);
+            // disallow external catalog
+            Util.prohibitExternalCatalog(dbTableName.getCtl(), this.getClass().getSimpleName());
+        }
         if (!isShowSingleTablet && Strings.isNullOrEmpty(dbName)) {
             dbName = analyzer.getDefaultDb();
             if (Strings.isNullOrEmpty(dbName)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
 
         if (partitionNames != null) {
@@ -209,11 +236,11 @@ public class ShowTabletStmt extends ShowStmt {
             }
             String leftKey = ((SlotRef) subExpr.getChild(0)).getColumnName();
             if (leftKey.equalsIgnoreCase("version")) {
-                 if (!(subExpr.getChild(1) instanceof IntLiteral) || version > -1) {
-                     valid = false;
-                     break;
-                 }
-                 version = ((IntLiteral) subExpr.getChild(1)).getValue();
+                if (!(subExpr.getChild(1) instanceof IntLiteral) || version > -1) {
+                    valid = false;
+                    break;
+                }
+                version = ((IntLiteral) subExpr.getChild(1)).getValue();
             } else if (leftKey.equalsIgnoreCase("backendid")) {
                 if (!(subExpr.getChild(1) instanceof IntLiteral) || backendId > -1) {
                     valid = false;
@@ -243,7 +270,7 @@ public class ShowTabletStmt extends ShowStmt {
                 valid = false;
                 break;
             }
-        } while(false);
+        } while (false);
 
         if (!valid) {
             throw new AnalysisException("Where clause should looks like: Version = \"version\","
@@ -264,7 +291,7 @@ public class ShowTabletStmt extends ShowStmt {
         if (limitElement != null) {
             if (limitElement.hasOffset() && limitElement.hasLimit()) {
                 sb.append(" ").append(limitElement.getOffset()).append(",").append(limitElement.getLimit());
-            } else if (limitElement.hasLimit()){
+            } else if (limitElement.hasLimit()) {
                 sb.append(" ").append(limitElement.getLimit());
             }
         }
@@ -285,6 +312,7 @@ public class ShowTabletStmt extends ShowStmt {
             builder.addColumn(new Column("IndexId", ScalarType.createVarchar(30)));
             builder.addColumn(new Column("IsSync", ScalarType.createVarchar(30)));
             builder.addColumn(new Column("Order", ScalarType.createVarchar(30)));
+            builder.addColumn(new Column("QueryHits", ScalarType.createVarchar(30)));
             builder.addColumn(new Column("DetailCmd", ScalarType.createVarchar(30)));
         } else {
             for (String title : TabletsProcDir.TITLE_NAMES) {

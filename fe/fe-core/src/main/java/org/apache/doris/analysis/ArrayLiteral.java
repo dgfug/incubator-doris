@@ -17,40 +17,80 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.ArrayType;
+import org.apache.doris.catalog.Type;
+import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.FormatOptions;
+import org.apache.doris.thrift.TExprNode;
+import org.apache.doris.thrift.TExprNodeType;
+
+import com.google.common.base.Preconditions;
+import org.apache.commons.lang3.StringUtils;
+
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-
-import org.apache.commons.lang.StringUtils;
-import org.apache.doris.catalog.ArrayType;
-import org.apache.doris.catalog.Type;
-import org.apache.doris.thrift.TExprNode;
-import org.apache.doris.thrift.TExprNodeType;
+import java.util.Objects;
 
 public class ArrayLiteral extends LiteralExpr {
 
     public ArrayLiteral() {
-        this.type = new ArrayType(Type.NULL);
+        type = new ArrayType(Type.NULL);
         children = new ArrayList<>();
     }
 
-    public ArrayLiteral(LiteralExpr... v) {
-        if (v.length < 1) {
-            this.type = new ArrayType(Type.NULL);
-            return;
+    public ArrayLiteral(Type type, LiteralExpr... exprs) {
+        this.type = type;
+        children = new ArrayList<>(Arrays.asList(exprs));
+        analysisDone();
+    }
+
+    public ArrayLiteral(LiteralExpr... exprs) throws AnalysisException {
+        Type itemType = Type.NULL;
+        boolean containsNull = true;
+        for (LiteralExpr expr : exprs) {
+            if (!ArrayType.ARRAY.supportSubType(expr.getType())) {
+                throw new AnalysisException("Invalid item type in Array, not support " + expr.getType());
+            }
+            if (itemType == Type.NULL) {
+                itemType = expr.getType();
+            } else {
+                itemType = Type.getAssignmentCompatibleType(itemType, expr.getType(), false, false);
+            }
+
+            if (expr.isNullable()) {
+                containsNull = true;
+            }
         }
 
-        this.type = new ArrayType(v[0].type);
-        children = new ArrayList<>(v.length);
-        children.addAll(Arrays.asList(v));
+        if (itemType == Type.INVALID) {
+            throw new AnalysisException("Invalid element type in ARRAY");
+        }
+
+        type = new ArrayType(itemType, containsNull);
+
+        children = new ArrayList<>();
+        try {
+            for (LiteralExpr expr : exprs) {
+                if (expr.getType().equals(itemType)) {
+                    children.add(expr);
+                } else {
+                    children.add(expr.convertTo(itemType));
+                }
+            }
+        } catch (AnalysisException e) {
+            String s = "[" + StringUtils.join(exprs, ',') + "]";
+            throw new AnalysisException("Invalid ARRAY " + s + " literal: " + e.getMessage());
+        }
+        analysisDone();
     }
 
     protected ArrayLiteral(ArrayLiteral other) {
         super(other);
     }
+
 
     @Override
     public boolean isMinValue() {
@@ -59,7 +99,14 @@ public class ArrayLiteral extends LiteralExpr {
 
     @Override
     public int compareLiteral(LiteralExpr expr) {
-        return 0;
+        int size = Math.min(expr.getChildren().size(), this.children.size());
+        for (int i = 0; i < size; i++) {
+            if (((LiteralExpr) (this.getChild(i))).compareTo((LiteralExpr) (expr.getChild(i))) != 0) {
+                return ((LiteralExpr) (this.getChild(i))).compareTo((LiteralExpr) (expr.getChild(i)));
+            }
+        }
+        return this.children.size() > expr.getChildren().size() ? 1 :
+                (this.children.size() == expr.getChildren().size() ? 0 : -1);
     }
 
     @Override
@@ -67,15 +114,61 @@ public class ArrayLiteral extends LiteralExpr {
         List<String> list = new ArrayList<>(children.size());
         children.forEach(v -> list.add(v.toSqlImpl()));
 
-        return "ARRAY(" + StringUtils.join(list, ", ") + ")";
+        return "[" + StringUtils.join(list, ", ") + "]";
+    }
+
+    @Override
+    public String toDigestImpl() {
+        List<String> list = new ArrayList<>(children.size());
+        children.forEach(v -> list.add(v.toDigestImpl()));
+
+        return "[" + StringUtils.join(list, ", ") + "]";
     }
 
     @Override
     public String getStringValue() {
         List<String> list = new ArrayList<>(children.size());
-        children.forEach(v -> list.add(((LiteralExpr) v).getStringValue()));
+        children.forEach(v -> list.add(v.getStringValue()));
+        return "[" + StringUtils.join(list, ", ") + "]";
+    }
 
-        return "ARRAY[" + StringUtils.join(list, ", ") + "]";
+    @Override
+    public String getStringValueForArray(FormatOptions options) {
+        List<String> list = new ArrayList<>(children.size());
+        children.forEach(v -> list.add(v.getStringValueForArray(options)));
+        return "[" + StringUtils.join(list, ", ") + "]";
+    }
+
+    @Override
+    public String getStringValueInFe(FormatOptions options) {
+        List<String> list = new ArrayList<>(children.size());
+        children.forEach(v -> {
+            String stringLiteral;
+            if (v instanceof NullLiteral) {
+                stringLiteral = options.getNullFormat();
+            } else {
+                stringLiteral = getStringLiteralForComplexType(v, options);
+            }
+            // we should use type to decide we output array is suitable for json format
+            list.add(stringLiteral);
+        });
+        return "[" + StringUtils.join(list, ", ") + "]";
+    }
+
+    @Override
+    public String getStringValueForStreamLoad(FormatOptions options) {
+        List<String> list = new ArrayList<>(children.size());
+        children.forEach(v -> {
+            String stringLiteral;
+            if (v instanceof NullLiteral) {
+                stringLiteral = "null";
+            } else {
+                stringLiteral = getStringLiteralForStreamLoad(v, options);
+            }
+            // we should use type to decide we output array is suitable for json format
+            list.add(stringLiteral);
+        });
+        return "[" + StringUtils.join(list, ", ") + "]";
     }
 
     @Override
@@ -85,12 +178,20 @@ public class ArrayLiteral extends LiteralExpr {
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeInt(children.size());
-        for (Expr e : children) {
-            Expr.writeTo(e, out);
+    public int hashCode() {
+        return Objects.hashCode(children);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (!(o instanceof ArrayLiteral)) {
+            return false;
         }
+        if (this == o) {
+            return true;
+        }
+        ArrayLiteral that = (ArrayLiteral) o;
+        return Objects.equals(children, that.children);
     }
 
     @Override
@@ -112,5 +213,43 @@ public class ArrayLiteral extends LiteralExpr {
     @Override
     public Expr clone() {
         return new ArrayLiteral(this);
+    }
+
+    @Override
+    public LiteralExpr convertTo(Type targetType) throws AnalysisException {
+        Preconditions.checkState(targetType instanceof ArrayType);
+        Type itemType = ((ArrayType) targetType).getItemType();
+        LiteralExpr[] literals = new LiteralExpr[children.size()];
+        for (int i = 0; i < children.size(); i++) {
+            literals[i] = (LiteralExpr) (Expr.convertLiteral(children.get(i), itemType));
+        }
+        return new ArrayLiteral(literals);
+    }
+
+    @Override
+    public Expr uncheckedCastTo(Type targetType) throws AnalysisException {
+        if (!targetType.isArrayType()) {
+            return super.uncheckedCastTo(targetType);
+        }
+        Type itemType = ((ArrayType) targetType).getItemType();
+        ArrayLiteral literal = new ArrayLiteral(this);
+        for (int i = 0; i < children.size(); ++ i) {
+            Expr child = Expr.convertLiteral(children.get(i), itemType);
+            // all children should be literal or else it will make be core
+            if (!child.isLiteral()) {
+                throw new AnalysisException("Unexpected array literal cast failed. from type: "
+                        + this.type + ", to type: " + targetType);
+            }
+            literal.children.set(i, child);
+        }
+        literal.setType(targetType);
+        return literal;
+    }
+
+    @Override
+    public void checkValueValid() throws AnalysisException {
+        for (Expr e : children) {
+            e.checkValueValid();
+        }
     }
 }

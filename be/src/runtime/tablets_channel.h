@@ -15,21 +15,47 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#pragma once
+
+#include <glog/logging.h>
+
+#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <ostream>
+#include <shared_mutex>
+#include <string>
 #include <unordered_map>
-#include <utility>
+#include <unordered_set>
 #include <vector>
 
-#include "gen_cpp/PaloInternalService_types.h"
-#include "gen_cpp/Types_types.h"
-#include "gen_cpp/internal_service.pb.h"
-#include "runtime/descriptors.h"
-#include "runtime/mem_tracker.h"
+#include "common/status.h"
 #include "util/bitmap.h"
-#include "util/priority_thread_pool.hpp"
+#include "util/runtime_profile.h"
+#include "util/spinlock.h"
 #include "util/uid_util.h"
 
+namespace google::protobuf {
+template <typename Element>
+class RepeatedField;
+template <typename Key, typename T>
+class Map;
+template <typename T>
+class RepeatedPtrField;
+} // namespace google::protobuf
+
 namespace doris {
+class PSlaveTabletNodes;
+class PSuccessSlaveTabletNodeIds;
+class PTabletError;
+class PTabletInfo;
+class PTabletWriterOpenRequest;
+class PTabletWriterAddBlockRequest;
+class PTabletWriterAddBlockResult;
+class PUniqueId;
+class TupleDescriptor;
+class OpenPartitionRequest;
+class StorageEngine;
 
 struct TabletsChannelKey {
     UniqueId id;
@@ -37,7 +63,7 @@ struct TabletsChannelKey {
 
     TabletsChannelKey(const PUniqueId& pid, int64_t index_id_) : id(pid), index_id(index_id_) {}
 
-    ~TabletsChannelKey() noexcept {}
+    ~TabletsChannelKey() noexcept = default;
 
     bool operator==(const TabletsChannelKey& rhs) const noexcept {
         return index_id == rhs.index_id && id == rhs.id;
@@ -48,51 +74,77 @@ struct TabletsChannelKey {
 
 std::ostream& operator<<(std::ostream& os, const TabletsChannelKey& key);
 
-class DeltaWriter;
+class BaseDeltaWriter;
+class MemTableWriter;
 class OlapTableSchemaParam;
+class LoadChannel;
+struct WriteRequest;
 
 // Write channel for a particular (load, index).
-class TabletsChannel {
+class BaseTabletsChannel {
 public:
-    TabletsChannel(const TabletsChannelKey& key, const std::shared_ptr<MemTracker>& mem_tracker);
+    BaseTabletsChannel(const TabletsChannelKey& key, const UniqueId& load_id, bool is_high_priority,
+                       RuntimeProfile* profile);
 
-    ~TabletsChannel();
+    virtual ~BaseTabletsChannel();
 
-    Status open(const PTabletWriterOpenRequest& params);
+    Status open(const PTabletWriterOpenRequest& request);
+    // open + open writers
+    Status incremental_open(const PTabletWriterOpenRequest& params);
+
+    virtual std::unique_ptr<BaseDeltaWriter> create_delta_writer(const WriteRequest& request) = 0;
 
     // no-op when this channel has been closed or cancelled
-    Status add_batch(const PTabletWriterAddBatchRequest& batch);
+    virtual Status add_batch(const PTabletWriterAddBlockRequest& request,
+                             PTabletWriterAddBlockResult* response) = 0;
 
     // Mark sender with 'sender_id' as closed.
     // If all senders are closed, close this channel, set '*finished' to true, update 'tablet_vec'
     // to include all tablets written in this channel.
     // no-op when this channel has been closed or cancelled
-    Status close(int sender_id, int64_t backend_id, bool* finished,
-                 const google::protobuf::RepeatedField<int64_t>& partition_ids,
-                 google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec);
+    virtual Status close(LoadChannel* parent, const PTabletWriterAddBlockRequest& req,
+                         PTabletWriterAddBlockResult* res, bool* finished) = 0;
 
     // no-op when this channel has been closed or cancelled
-    Status cancel();
+    virtual Status cancel();
 
-    // upper application may call this to try to reduce the mem usage of this channel.
-    // eg. flush the largest memtable immediately.
-    // return Status::OK if mem is reduced.
-    // no-op when this channel has been closed or cancelled
-    Status reduce_mem_usage(int64_t mem_limit);
+    void refresh_profile();
 
-    int64_t mem_consumption() const { return _mem_tracker->consumption(); }
+    size_t total_received_rows() const { return _total_received_rows; }
 
-private:
+    size_t num_rows_filtered() const { return _num_rows_filtered; }
+
+    // means this tablets in this BE is incremental opened partitions.
+    bool is_incremental_channel() const { return _open_by_incremental; }
+
+    bool is_finished() const { return _state == kFinished; }
+
+protected:
+    Status _write_block_data(const PTabletWriterAddBlockRequest& request, int64_t cur_seq,
+                             std::unordered_map<int64_t, std::vector<uint32_t>>& tablet_to_rowidxs,
+                             PTabletWriterAddBlockResult* response);
+
+    Status _get_current_seq(int64_t& cur_seq, const PTabletWriterAddBlockRequest& request);
+
     // open all writer
-    Status _open_all_writers(const PTabletWriterOpenRequest& params);
+    Status _open_all_writers(const PTabletWriterOpenRequest& request);
 
-private:
+    void _add_broken_tablet(int64_t tablet_id);
+    // thread-unsafe, add a shared lock for `_tablet_writers_lock` if needed
+    bool _is_broken_tablet(int64_t tablet_id) const;
+    void _add_error_tablet(google::protobuf::RepeatedPtrField<PTabletError>* tablet_errors,
+                           int64_t tablet_id, Status error) const;
+    void _build_tablet_to_rowidxs(
+            const PTabletWriterAddBlockRequest& request,
+            std::unordered_map<int64_t /* tablet_id */, std::vector<uint32_t> /* row index */>*
+                    tablet_to_rowidxs);
+    virtual void _init_profile(RuntimeProfile* profile);
+
     // id of this load channel
     TabletsChannelKey _key;
 
-    // make execute sequence
+    // protect _state change. open and close. when add_batch finished, lock to change _next_seqs also
     std::mutex _lock;
-
     enum State {
         kInitialized,
         kOpened,
@@ -100,15 +152,17 @@ private:
     };
     State _state;
 
+    UniqueId _load_id;
+
     // initialized in open function
     int64_t _txn_id = -1;
     int64_t _index_id = -1;
-    OlapTableSchemaParam* _schema = nullptr;
+    std::shared_ptr<OlapTableSchemaParam> _schema;
     TupleDescriptor* _tuple_desc = nullptr;
-    // row_desc used to construct
-    RowDescriptor* _row_desc = nullptr;
+    bool _open_by_incremental = false;
 
     // next sequence we expect
+    std::set<int32_t> _recieved_senders;
     int _num_remaining_senders = 0;
     std::vector<int64_t> _next_seqs;
     Bitmap _closed_senders;
@@ -116,14 +170,72 @@ private:
     // currently it's OK.
     Status _close_status;
 
-    // tablet_id -> TabletChannel
-    std::unordered_map<int64_t, DeltaWriter*> _tablet_writers;
+    // tablet_id -> TabletChannel. it will only be changed in open() or inc_open()
+    std::unordered_map<int64_t, std::unique_ptr<BaseDeltaWriter>> _tablet_writers;
+    // protect _tablet_writers
+    SpinLock _tablet_writers_lock;
+    // broken tablet ids.
+    // If a tablet write fails, it's id will be added to this set.
+    // So that following batch will not handle this tablet anymore.
+    std::unordered_set<int64_t> _broken_tablets;
+
+    std::shared_mutex _broken_tablets_lock;
+
+    std::unordered_set<int64_t> _reducing_tablets;
 
     std::unordered_set<int64_t> _partition_ids;
 
-    std::shared_ptr<MemTracker> _mem_tracker;
-
     static std::atomic<uint64_t> _s_tablet_writer_count;
+
+    bool _is_high_priority = false;
+
+    RuntimeProfile* _profile = nullptr;
+    RuntimeProfile::Counter* _add_batch_number_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _write_memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _flush_memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _max_tablet_memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _max_tablet_write_memory_usage_counter = nullptr;
+    RuntimeProfile::HighWaterMarkCounter* _max_tablet_flush_memory_usage_counter = nullptr;
+    RuntimeProfile::Counter* _add_batch_timer = nullptr;
+    RuntimeProfile::Counter* _write_block_timer = nullptr;
+    RuntimeProfile::Counter* _incremental_open_timer = nullptr;
+
+    // record rows received and filtered
+    size_t _total_received_rows = 0;
+    size_t _num_rows_filtered = 0;
+};
+
+class DeltaWriter;
+
+// `StorageEngine` mixin for `BaseTabletsChannel`
+class TabletsChannel final : public BaseTabletsChannel {
+public:
+    TabletsChannel(StorageEngine& engine, const TabletsChannelKey& key, const UniqueId& load_id,
+                   bool is_high_priority, RuntimeProfile* profile);
+
+    ~TabletsChannel() override;
+
+    std::unique_ptr<BaseDeltaWriter> create_delta_writer(const WriteRequest& request) override;
+
+    Status add_batch(const PTabletWriterAddBlockRequest& request,
+                     PTabletWriterAddBlockResult* response) override;
+
+    Status close(LoadChannel* parent, const PTabletWriterAddBlockRequest& req,
+                 PTabletWriterAddBlockResult* res, bool* finished) override;
+
+    Status cancel() override;
+
+private:
+    void _init_profile(RuntimeProfile* profile) override;
+
+    // deal with DeltaWriter commit_txn(), add tablet to list for return.
+    void _commit_txn(DeltaWriter* writer, const PTabletWriterAddBlockRequest& req,
+                     PTabletWriterAddBlockResult* res);
+
+    StorageEngine& _engine;
+    bool _write_single_replica = false;
+    RuntimeProfile::Counter* _slave_replica_timer = nullptr;
 };
 
 } // namespace doris

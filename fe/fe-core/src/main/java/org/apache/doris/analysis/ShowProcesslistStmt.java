@@ -18,33 +18,53 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 // SHOW PROCESSLIST statement.
 // Used to show connection belong to this user.
-public class ShowProcesslistStmt extends ShowStmt {
-    private static final ShowResultSetMetaData META_DATA =
-            ShowResultSetMetaData.builder()
-                    .addColumn(new Column("Id", ScalarType.createType(PrimitiveType.BIGINT)))
-                    .addColumn(new Column("User", ScalarType.createVarchar(16)))
-                    .addColumn(new Column("Host", ScalarType.createVarchar(16)))
-                    .addColumn(new Column("Cluster", ScalarType.createVarchar(16)))
-                    .addColumn(new Column("Db", ScalarType.createVarchar(16)))
-                    .addColumn(new Column("Command", ScalarType.createVarchar(16)))
-                    .addColumn(new Column("Time", ScalarType.createType(PrimitiveType.INT)))
-                    .addColumn(new Column("State", ScalarType.createVarchar(64)))
-                    .addColumn(new Column("Info", ScalarType.createVarchar(16)))
-                    .build();
+public class ShowProcesslistStmt extends ShowStmt implements NotFallbackInParser {
+    private static final ShowResultSetMetaData META_DATA = ShowResultSetMetaData.builder()
+            .addColumn(new Column("CurrentConnected", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Id", ScalarType.createType(PrimitiveType.BIGINT)))
+            .addColumn(new Column("User", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Host", ScalarType.createVarchar(16)))
+            .addColumn(new Column("LoginTime", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Catalog", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Db", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Command", ScalarType.createVarchar(16)))
+            .addColumn(new Column("Time", ScalarType.createType(PrimitiveType.INT)))
+            .addColumn(new Column("State", ScalarType.createVarchar(64)))
+            .addColumn(new Column("QueryId", ScalarType.createVarchar(64)))
+            .addColumn(new Column("Info", ScalarType.STRING))
+            .addColumn(new Column("FE", ScalarType.createVarchar(16)))
+            .addColumn(new Column("CloudCluster", ScalarType.createVarchar(16))).build();
+
+    private boolean isFull;
+    private boolean isShowAllFe;
+
+    public ShowProcesslistStmt(boolean isFull) {
+        this.isFull = isFull;
+    }
+
+    public boolean isFull() {
+        return isFull;
+    }
 
     @Override
     public void analyze(Analyzer analyzer) {
+        this.isShowAllFe = ConnectContext.get().getSessionVariable().getShowAllFeConnection();
+    }
+
+    public boolean isShowAllFe() {
+        return isShowAllFe;
     }
 
     @Override
     public String toSql() {
-        return "SHOW PROCESSLIST";
+        return "SHOW " + (isFull ? "FULL" : "") + "PROCESSLIST";
     }
 
     @Override

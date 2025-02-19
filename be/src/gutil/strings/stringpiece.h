@@ -109,27 +109,22 @@
 // (3) A null StringPiece is empty.
 //     An empty StringPiece may or may not be a null StringPiece.
 
-#ifndef STRINGS_STRINGPIECE_H_
-#define STRINGS_STRINGPIECE_H_
+#pragma once
 
 #include <assert.h>
 #include <stddef.h>
 #include <string.h>
 
-#include <functional>
+#include <cstddef>
 #include <iosfwd>
-#include <limits>
+#include <iterator>
+#include <limits> // IWYU pragma: keep
 #include <string>
-
-#include "gutil/hash/hash.h"
-#include "gutil/integral_types.h"
-#include "gutil/port.h"
-#include "gutil/strings/fastmem.h"
-#include "gutil/type_traits.h"
+#include <string_view>
 
 class StringPiece {
 private:
-    const char* ptr_;
+    const char* ptr_ = nullptr;
     int length_;
 
 public:
@@ -151,6 +146,12 @@ public:
     StringPiece(const std::string& str) // NOLINT(runtime/explicit)
             : ptr_(str.data()), length_(0) {
         size_t length = str.size();
+        assert(length <= static_cast<size_t>(std::numeric_limits<int>::max()));
+        length_ = static_cast<int>(length);
+    }
+    StringPiece(std::string_view view) // NOLINT(runtime/explicit)
+            : ptr_(view.data()), length_(0) {
+        size_t length = view.size();
         assert(length <= static_cast<size_t>(std::numeric_limits<int>::max()));
         length_ = static_cast<int>(length);
     }
@@ -289,10 +290,6 @@ public:
     StringPiece substr(size_type pos, size_type n = npos) const;
 };
 
-#ifndef SWIG
-DECLARE_POD(StringPiece); // So vector<StringPiece> becomes really fast
-#endif
-
 // This large function is defined inline so that in a fairly common case where
 // one of the arguments is a literal, the compiler can elide a lot of the
 // following comparisons.
@@ -302,7 +299,7 @@ inline bool operator==(StringPiece x, StringPiece y) {
         return false;
     }
 
-    return x.data() == y.data() || len <= 0 || strings::memeq(x.data(), y.data(), len);
+    return x.data() == y.data() || len <= 0 || 0 == memcmp(x.data(), y.data(), len);
 }
 
 inline bool operator!=(StringPiece x, StringPiece y) {
@@ -326,40 +323,6 @@ inline bool operator<=(StringPiece x, StringPiece y) {
 inline bool operator>=(StringPiece x, StringPiece y) {
     return !(x < y);
 }
-class StringPiece;
-template <class X>
-struct GoodFastHash;
-
-// ------------------------------------------------------------------
-// Functions used to create STL containers that use StringPiece
-//  Remember that a StringPiece's lifetime had better be less than
-//  that of the underlying string or char*.  If it is not, then you
-//  cannot safely store a StringPiece into an STL container
-// ------------------------------------------------------------------
-
-// SWIG doesn't know how to parse this stuff properly. Omit it.
-#ifndef SWIG
-
-namespace std {
-template <>
-struct hash<StringPiece> {
-    size_t operator()(StringPiece s) const;
-};
-} // namespace std
-
-// An implementation of GoodFastHash for StringPiece.  See
-// GoodFastHash values.
-template <>
-struct GoodFastHash<StringPiece> {
-    size_t operator()(StringPiece s) const { return HashStringThoroughly(s.data(), s.size()); }
-    // Less than operator, for MSVC.
-    bool operator()(const StringPiece& s1, const StringPiece& s2) const { return s1 < s2; }
-    static const size_t bucket_size = 4; // These are required by MSVC
-    static const size_t min_buckets = 8; // 4 and 8 are defaults.
-};
-#endif
 
 // allow StringPiece to be logged
-extern ostream& operator<<(ostream& o, StringPiece piece);
-
-#endif // STRINGS_STRINGPIECE_H__
+extern std::ostream& operator<<(std::ostream& o, StringPiece piece);

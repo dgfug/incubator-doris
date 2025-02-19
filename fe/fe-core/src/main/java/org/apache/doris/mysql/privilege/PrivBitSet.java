@@ -18,15 +18,23 @@
 package org.apache.doris.mysql.privilege;
 
 import org.apache.doris.analysis.CompoundPredicate.Operator;
+import org.apache.doris.analysis.ResourcePattern;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.FeMetaVersion;
+import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 // ....0000000000
 //        ^     ^
@@ -35,23 +43,24 @@ import java.util.List;
 //        |--------last priv(7)
 public class PrivBitSet implements Writable {
 
+    @SerializedName(value = "set")
     private long set = 0;
 
     public PrivBitSet() {
     }
 
     public void set(int index) {
-        Preconditions.checkState(index < PaloPrivilege.privileges.length, index);
+        Preconditions.checkState(Privilege.privileges.containsKey(index), index);
         set |= 1 << index;
     }
 
     public void unset(int index) {
-        Preconditions.checkState(index < PaloPrivilege.privileges.length, index);
-        set &= ~set;
+        Preconditions.checkState(Privilege.privileges.containsKey(index), index);
+        set &= ~(1 << index);
     }
 
     public boolean get(int index) {
-        Preconditions.checkState(index < PaloPrivilege.privileges.length, index);
+        Preconditions.checkState(Privilege.privileges.containsKey(index), index);
         return (set & (1 << index)) > 0;
     }
 
@@ -65,6 +74,10 @@ public class PrivBitSet implements Writable {
 
     public void xor(PrivBitSet other) {
         set ^= other.set;
+    }
+
+    public void clean() {
+        this.set = 0;
     }
 
     public void remove(PrivBitSet privs) {
@@ -86,20 +99,20 @@ public class PrivBitSet implements Writable {
     }
 
     public boolean containsNodePriv() {
-        return containsPrivs(PaloPrivilege.NODE_PRIV);
+        return containsPrivs(Privilege.NODE_PRIV);
     }
 
     public boolean containsResourcePriv() {
-        return containsPrivs(PaloPrivilege.USAGE_PRIV);
+        return containsPrivs(Privilege.USAGE_PRIV, Privilege.CLUSTER_USAGE_PRIV, Privilege.STAGE_USAGE_PRIV);
     }
 
     public boolean containsDbTablePriv() {
-        return containsPrivs(PaloPrivilege.SELECT_PRIV, PaloPrivilege.LOAD_PRIV, PaloPrivilege.ALTER_PRIV,
-                             PaloPrivilege.CREATE_PRIV, PaloPrivilege.DROP_PRIV);
+        return containsPrivs(Privilege.SELECT_PRIV, Privilege.LOAD_PRIV, Privilege.ALTER_PRIV,
+                Privilege.CREATE_PRIV, Privilege.DROP_PRIV);
     }
 
-    public boolean containsPrivs(PaloPrivilege... privs) {
-        for (PaloPrivilege priv : privs) {
+    public boolean containsPrivs(Privilege... privs) {
+        for (Privilege priv : privs) {
             if (get(priv.getIdx())) {
                 return true;
             }
@@ -107,27 +120,27 @@ public class PrivBitSet implements Writable {
         return false;
     }
 
-    public List<PaloPrivilege> toPrivilegeList() {
-        List<PaloPrivilege> privs = Lists.newArrayList();
-        for (int i = 0; i < PaloPrivilege.privileges.length; i++) {
-            if (get(i)) {
-                privs.add(PaloPrivilege.getPriv(i));
+    public List<Privilege> toPrivilegeList() {
+        List<Privilege> privs = Lists.newArrayList();
+        Privilege.privileges.keySet().forEach(idx -> {
+            if (get(idx)) {
+                privs.add(Privilege.getPriv(idx));
             }
-        }
+        });
         return privs;
     }
 
-    public static PrivBitSet of(PaloPrivilege... privs) {
+    public static PrivBitSet of(Privilege... privs) {
         PrivBitSet bitSet = new PrivBitSet();
-        for (PaloPrivilege priv : privs) {
+        for (Privilege priv : privs) {
             bitSet.set(priv.getIdx());
         }
         return bitSet;
     }
 
-    public static PrivBitSet of(List<PaloPrivilege> privs) {
+    public static PrivBitSet of(Collection<Privilege> privs) {
         PrivBitSet bitSet = new PrivBitSet();
-        for (PaloPrivilege priv : privs) {
+        for (Privilege priv : privs) {
             bitSet.set(priv.getIdx());
         }
         return bitSet;
@@ -142,26 +155,46 @@ public class PrivBitSet implements Writable {
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < PaloPrivilege.privileges.length; i++) {
-            if (get(i)) {
-                sb.append(PaloPrivilege.getPriv(i)).append(" ");
+        Privilege.privileges.keySet().forEach(idx -> {
+            if (get(idx)) {
+                sb.append(Privilege.getPriv(idx)).append(",");
             }
+        });
+        String res = sb.toString();
+        if (res.length() > 0) {
+            return res.substring(0, res.length() - 1);
+        } else {
+            return res;
         }
-        return sb.toString();
     }
 
     public static PrivBitSet read(DataInput in) throws IOException {
-        PrivBitSet privBitSet = new PrivBitSet();
-        privBitSet.readFields(in);
-        return privBitSet;
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_113) {
+            PrivBitSet privBitSet = new PrivBitSet();
+            privBitSet.set = in.readLong();
+            return privBitSet;
+        } else {
+            return GsonUtils.GSON.fromJson(Text.readString(in), PrivBitSet.class);
+        }
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
-        out.writeLong(set);
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
-    public void readFields(DataInput in) throws IOException {
-        set = in.readLong();
+    public static void convertResourcePrivToCloudPriv(ResourcePattern resourcePattern, Set<Privilege> privileges) {
+        switch (resourcePattern.getResourceType()) {
+            case CLUSTER:
+                privileges.clear();
+                privileges.add(Privilege.CLUSTER_USAGE_PRIV);
+                break;
+            case STAGE:
+                privileges.clear();
+                privileges.add(Privilege.STAGE_USAGE_PRIV);
+                break;
+            default:
+                break;
+        }
     }
 }

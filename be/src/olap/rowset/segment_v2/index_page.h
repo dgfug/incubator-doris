@@ -17,13 +17,16 @@
 
 #pragma once
 
+#include <butil/macros.h>
+#include <gen_cpp/segment_v2.pb.h>
+#include <glog/logging.h>
+#include <stdint.h>
+
 #include <cstddef>
-#include <memory>
 #include <vector>
 
 #include "common/status.h"
-#include "gen_cpp/segment_v2.pb.h"
-#include "gutil/macros.h"
+#include "olap/metadata_adder.h"
 #include "olap/rowset/segment_v2/page_pointer.h"
 #include "util/faststring.h"
 #include "util/slice.h"
@@ -77,30 +80,29 @@ private:
     uint32_t _count = 0;
 };
 
-class IndexPageIterator;
-class IndexPageReader {
+class IndexPageReader : public MetadataAdder<IndexPageReader> {
 public:
     IndexPageReader() : _parsed(false) {}
 
     Status parse(const Slice& body, const IndexPageFooterPB& footer);
 
-    inline size_t count() const {
+    size_t count() const {
         DCHECK(_parsed);
         return _footer.num_entries();
     }
 
-    inline bool is_leaf() const {
+    bool is_leaf() const {
         DCHECK(_parsed);
         return _footer.type() == IndexPageFooterPB::LEAF;
     }
 
-    inline const Slice& get_key(int idx) const {
+    const Slice& get_key(int idx) const {
         DCHECK(_parsed);
         DCHECK(idx >= 0 && idx < _footer.num_entries());
         return _keys[idx];
     }
 
-    inline const PagePointer& get_value(int idx) const {
+    const PagePointer& get_value(int idx) const {
         DCHECK(_parsed);
         DCHECK(idx >= 0 && idx < _footer.num_entries());
         return _values[idx];
@@ -109,11 +111,14 @@ public:
     void reset();
 
 private:
+    int64_t get_metadata_size() const override;
+
     bool _parsed;
 
     IndexPageFooterPB _footer;
     std::vector<Slice> _keys;
     std::vector<PagePointer> _values;
+    int64_t _vl_field_mem_size {0};
 };
 
 class IndexPageIterator {
@@ -122,9 +127,11 @@ public:
 
     // Find the largest index entry whose key is <= search_key.
     // Return OK status when such entry exists.
-    // Return NotFound when no such entry is found (all keys > search_key).
+    // Return ENTRY_NOT_FOUND when no such entry is found (all keys > search_key).
     // Return other error status otherwise.
     Status seek_at_or_before(const Slice& search_key);
+
+    void seek_to_first() { _pos = 0; }
 
     // Move to the next index entry.
     // Return true on success, false when no more entries can be read.
@@ -136,12 +143,15 @@ public:
         return true;
     }
 
+    // Return true when has next page.
+    bool has_next() { return (_pos + 1) < _reader->count(); }
+
     const Slice& current_key() const { return _reader->get_key(_pos); }
 
     const PagePointer& current_page_pointer() const { return _reader->get_value(_pos); }
 
 private:
-    const IndexPageReader* _reader;
+    const IndexPageReader* _reader = nullptr;
 
     size_t _pos;
 };

@@ -15,97 +15,105 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_BLOOM_FILTER_PREDICATE_H
-#define DORIS_BE_SRC_OLAP_BLOOM_FILTER_PREDICATE_H
+#pragma once
 
-#include <stdint.h>
-
-#include <roaring/roaring.hh>
-
-#include "exprs/bloomfilter_predicate.h"
+#include "exprs/bloom_filter_func.h"
+#include "exprs/runtime_filter.h"
 #include "olap/column_predicate.h"
-#include "olap/field.h"
-#include "runtime/string_value.hpp"
-#include "runtime/vectorized_row_batch.h"
+#include "runtime/primitive_type.h"
+#include "vec/columns/column_dictionary.h"
+#include "vec/columns/column_nullable.h"
+#include "vec/columns/column_vector.h"
+#include "vec/columns/predicate_column.h"
+#include "vec/common/assert_cast.h"
+#include "vec/exprs/vruntimefilter_wrapper.h"
 
 namespace doris {
 
-class VectorizedRowBatch;
-
-// only use in runtime filter and segment v2
-template <PrimitiveType type>
+template <PrimitiveType T>
 class BloomFilterColumnPredicate : public ColumnPredicate {
 public:
-    using SpecificFilter = BloomFilterFunc<type, CurrentBloomFilterAdaptor>;
+    using SpecificFilter = BloomFilterFunc<T>;
 
     BloomFilterColumnPredicate(uint32_t column_id,
-                               const std::shared_ptr<IBloomFilterFuncBase>& filter)
+                               const std::shared_ptr<BloomFilterFuncBase>& filter)
             : ColumnPredicate(column_id),
               _filter(filter),
-              _specific_filter(static_cast<SpecificFilter*>(_filter.get())) {}
+              _specific_filter(assert_cast<SpecificFilter*>(_filter.get())) {}
     ~BloomFilterColumnPredicate() override = default;
 
-    void evaluate(VectorizedRowBatch* batch) const override;
+    PredicateType type() const override { return PredicateType::BF; }
 
-    void evaluate(ColumnBlock* block, uint16_t* sel, uint16_t* size) const override;
-
-    void evaluate_or(ColumnBlock* block, uint16_t* sel, uint16_t size,
-                     bool* flags) const override {};
-    void evaluate_and(ColumnBlock* block, uint16_t* sel, uint16_t size,
-                      bool* flags) const override {};
-
-    Status evaluate(const Schema& schema, const vector<BitmapIndexIterator*>& iterators,
-                    uint32_t num_rows, roaring::Roaring* roaring) const override {
+    Status evaluate(BitmapIndexIterator* iterators, uint32_t num_rows,
+                    roaring::Roaring* roaring) const override {
         return Status::OK();
     }
 
+    bool can_do_apply_safely(PrimitiveType input_type, bool is_null) const override {
+        return input_type == T || (is_string_type(input_type) && is_string_type(T));
+    }
+
+    double get_ignore_threshold() const override { return get_bloom_filter_ignore_thredhold(); }
+
 private:
-    std::shared_ptr<IBloomFilterFuncBase> _filter;
+    bool _can_ignore() const override { return _filter->is_runtime_filter(); }
+
+    uint16_t _evaluate_inner(const vectorized::IColumn& column, uint16_t* sel,
+                             uint16_t size) const override;
+
+    template <bool is_nullable>
+    uint16_t evaluate(const vectorized::IColumn& column, const uint8_t* null_map, uint16_t* sel,
+                      uint16_t size) const {
+        if constexpr (is_nullable) {
+            if (!null_map) {
+                throw Exception(ErrorCode::INTERNAL_ERROR, "null_map is nullptr");
+            }
+        }
+
+        uint16_t new_size = 0;
+        if (column.is_column_dictionary()) {
+            const auto* dict_col = assert_cast<const vectorized::ColumnDictI32*>(&column);
+            new_size = _specific_filter->template find_dict_olap_engine<is_nullable>(
+                    dict_col, null_map, sel, size);
+        } else {
+            const auto& data =
+                    assert_cast<const vectorized::PredicateColumnType<PredicateEvaluateType<T>>*>(
+                            &column)
+                            ->get_data();
+            new_size = _specific_filter->find_fixed_len_olap_engine((char*)data.data(), null_map,
+                                                                    sel, size, data.size() != size);
+        }
+        return new_size;
+    }
+
+    std::string _debug_string() const override {
+        std::string info = "BloomFilterColumnPredicate(" + type_to_string(T) +
+                           ", filter_id=" + std::to_string(_filter->get_filter_id()) + ")";
+        return info;
+    }
+
+    int get_filter_id() const override {
+        int filter_id = _filter->get_filter_id();
+        if (filter_id == -1) {
+            throw Exception(ErrorCode::INTERNAL_ERROR, "filter_id is -1");
+        }
+        return filter_id;
+    }
+
+    std::shared_ptr<BloomFilterFuncBase> _filter;
     SpecificFilter* _specific_filter; // owned by _filter
 };
 
-// blomm filter column predicate do not support in segment v1
-template <PrimitiveType type>
-void BloomFilterColumnPredicate<type>::evaluate(VectorizedRowBatch* batch) const {
-    uint16_t n = batch->size();
-    uint16_t* sel = batch->selected();
-    if (!batch->selected_in_use()) {
-        for (uint16_t i = 0; i != n; ++i) {
-            sel[i] = i;
-        }
-    }
-}
-
-template <PrimitiveType type>
-void BloomFilterColumnPredicate<type>::evaluate(ColumnBlock* block, uint16_t* sel,
-                                                uint16_t* size) const {
-    uint16_t new_size = 0;
-    if (block->is_nullable()) {
-        for (uint16_t i = 0; i < *size; ++i) {
-            uint16_t idx = sel[i];
-            sel[new_size] = idx;
-            const auto* cell_value = reinterpret_cast<const void*>(block->cell(idx).cell_ptr());
-            new_size +=
-                    (!block->cell(idx).is_null() && _specific_filter->find_olap_engine(cell_value));
-        }
+template <PrimitiveType T>
+uint16_t BloomFilterColumnPredicate<T>::_evaluate_inner(const vectorized::IColumn& column,
+                                                        uint16_t* sel, uint16_t size) const {
+    if (column.is_nullable()) {
+        const auto* nullable_col = assert_cast<const vectorized::ColumnNullable*>(&column);
+        const auto& null_map_data = nullable_col->get_null_map_column().get_data();
+        return evaluate<true>(nullable_col->get_nested_column(), null_map_data.data(), sel, size);
     } else {
-        for (uint16_t i = 0; i < *size; ++i) {
-            uint16_t idx = sel[i];
-            sel[new_size] = idx;
-            const auto* cell_value = reinterpret_cast<const void*>(block->cell(idx).cell_ptr());
-            new_size += _specific_filter->find_olap_engine(cell_value);
-        }
+        return evaluate<false>(column, nullptr, sel, size);
     }
-    *size = new_size;
 }
-
-class BloomFilterColumnPredicateFactory {
-public:
-    static ColumnPredicate* create_column_predicate(
-            uint32_t column_id, const std::shared_ptr<IBloomFilterFuncBase>& filter,
-            FieldType type);
-};
 
 } //namespace doris
-
-#endif //DORIS_BE_SRC_OLAP_BLOOM_FILTER_PREDICATE_H

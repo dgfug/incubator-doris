@@ -17,27 +17,24 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
-import org.apache.doris.mysql.MysqlPassword;
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.Auth;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-import com.google.common.base.Strings;
-
 public class SetPassVar extends SetVar {
     private UserIdentity userIdent;
-    private String passwdParam;
-    private byte[] passwdBytes;
+    private PassVar passVar;
 
     // The password in parameter is a hashed password.
-    public SetPassVar(UserIdentity userIdent, String passwd) {
+    public SetPassVar(UserIdentity userIdent, PassVar passVar) {
         this.userIdent = userIdent;
-        this.passwdParam = passwd;
+        this.passVar = passVar;
+        this.varType = SetVarType.SET_PASS_VAR;
     }
 
     public UserIdentity getUserIdent() {
@@ -45,15 +42,11 @@ public class SetPassVar extends SetVar {
     }
 
     public byte[] getPassword() {
-        return passwdBytes;
+        return passVar.getScrambled();
     }
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NO_SELECT_CLUSTER);
-        }
-
         boolean isSelf = false;
         ConnectContext ctx = ConnectContext.get();
         if (userIdent == null) {
@@ -61,14 +54,16 @@ public class SetPassVar extends SetVar {
             userIdent = ctx.getCurrentUserIdentity();
             isSelf = true;
         } else {
-            userIdent.analyze(analyzer.getClusterName());
+            userIdent.analyze();
             if (userIdent.equals(ctx.getCurrentUserIdentity())) {
                 isSelf = true;
             }
         }
 
         // Check password
-        passwdBytes = MysqlPassword.checkPassword(passwdParam);
+        if (passVar != null) {
+            passVar.analyze();
+        }
 
         // check privs.
         // 1. this is user itself
@@ -77,13 +72,13 @@ public class SetPassVar extends SetVar {
         }
 
         // 2. No user can set password for root expect for root user itself
-        if (userIdent.getQualifiedUser().equals(PaloAuth.ROOT_USER)
-                && !ClusterNamespace.getNameFromFullName(ctx.getQualifiedUser()).equals(PaloAuth.ROOT_USER)) {
+        if (userIdent.getQualifiedUser().equals(Auth.ROOT_USER)
+                && !ClusterNamespace.getNameFromFullName(ctx.getQualifiedUser()).equals(Auth.ROOT_USER)) {
             throw new AnalysisException("Can not set password for root user, except root itself");
         }
 
         // 3. user has grant privs
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "GRANT");
         }
     }

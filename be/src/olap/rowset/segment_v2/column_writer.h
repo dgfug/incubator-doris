@@ -17,23 +17,33 @@
 
 #pragma once
 
-#include <memory> // for unique_ptr
+#include <gen_cpp/segment_v2.pb.h>
+#include <stddef.h>
+#include <stdint.h>
 
-#include "common/status.h"         // for Status
-#include "gen_cpp/segment_v2.pb.h" // for EncodingTypePB
+#include <algorithm>
+#include <memory> // for unique_ptr
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "common/status.h" // for Status
+#include "olap/field.h"    // for Field
+#include "olap/rowset/segment_v2/bloom_filter.h"
 #include "olap/rowset/segment_v2/common.h"
-#include "olap/rowset/segment_v2/page_pointer.h" // for PagePointer
-#include "olap/tablet_schema.h"                  // for TabletColumn
-#include "util/bitmap.h"                         // for BitmapChange
-#include "util/slice.h"                          // for OwnedSlice
+#include "olap/rowset/segment_v2/inverted_index_writer.h"
+#include "util/bitmap.h" // for BitmapChange
+#include "util/slice.h"  // for OwnedSlice
 
 namespace doris {
 
-class TypeInfo;
 class BlockCompressionCodec;
+class TabletColumn;
+class TabletIndex;
 
-namespace fs {
-class WritableBlock;
+namespace io {
+class FileWriter;
 }
 
 namespace segment_v2 {
@@ -42,7 +52,7 @@ struct ColumnWriterOptions {
     // input and output parameter:
     // - input: column_id/unique_id/type/length/encoding/compression/is_nullable members
     // - output: encoding/indexes/dict_page members
-    ColumnMetaPB* meta;
+    ColumnMetaPB* meta = nullptr;
     size_t data_page_size = 64 * 1024;
     // store compressed page only when space saving is above the threshold.
     // space saving = 1 - compressed_size / uncompressed_size
@@ -50,7 +60,15 @@ struct ColumnWriterOptions {
     bool need_zone_map = false;
     bool need_bitmap_index = false;
     bool need_bloom_filter = false;
-    std::string to_string() {
+    bool is_ngram_bf_index = false;
+    bool need_inverted_index = false;
+    uint8_t gram_size;
+    uint16_t gram_bf_size;
+    BloomFilterOptions bf_options;
+    std::vector<const TabletIndex*> indexes; // unused
+    const TabletIndex* inverted_index = nullptr;
+    InvertedIndexFileWriter* inverted_index_file_writer;
+    std::string to_string() const {
         std::stringstream ss;
         ss << std::boolalpha << "meta=" << meta->DebugString()
            << ", data_page_size=" << data_page_size
@@ -59,7 +77,6 @@ struct ColumnWriterOptions {
            << ", need_bloom_filter" << need_bloom_filter;
         return ss.str();
     }
-    std::shared_ptr<MemTracker> parent = nullptr;
 };
 
 class BitmapIndexWriter;
@@ -73,7 +90,19 @@ class ZoneMapIndexWriter;
 class ColumnWriter {
 public:
     static Status create(const ColumnWriterOptions& opts, const TabletColumn* column,
-                         fs::WritableBlock* _wblock, std::unique_ptr<ColumnWriter>* writer);
+                         io::FileWriter* file_writer, std::unique_ptr<ColumnWriter>* writer);
+    static Status create_struct_writer(const ColumnWriterOptions& opts, const TabletColumn* column,
+                                       io::FileWriter* file_writer,
+                                       std::unique_ptr<ColumnWriter>* writer);
+    static Status create_array_writer(const ColumnWriterOptions& opts, const TabletColumn* column,
+                                      io::FileWriter* file_writer,
+                                      std::unique_ptr<ColumnWriter>* writer);
+    static Status create_map_writer(const ColumnWriterOptions& opts, const TabletColumn* column,
+                                    io::FileWriter* file_writer,
+                                    std::unique_ptr<ColumnWriter>* writer);
+    static Status create_agg_state_writer(const ColumnWriterOptions& opts,
+                                          const TabletColumn* column, io::FileWriter* file_writer,
+                                          std::unique_ptr<ColumnWriter>* writer);
 
     explicit ColumnWriter(std::unique_ptr<Field> field, bool is_nullable)
             : _field(std::move(field)), _is_nullable(is_nullable) {}
@@ -102,7 +131,12 @@ public:
         return append_nullable(&nullmap, data, 1);
     }
 
+    Status append(const uint8_t* nullmap, const void* data, size_t num_rows);
+
     Status append_nullable(const uint8_t* nullmap, const void* data, size_t num_rows);
+
+    // use only in vectorized load
+    virtual Status append_nullable(const uint8_t* null_map, const uint8_t** data, size_t num_rows);
 
     virtual Status append_nulls(size_t num_rows) = 0;
 
@@ -122,18 +156,14 @@ public:
 
     virtual Status write_bitmap_index() = 0;
 
+    virtual Status write_inverted_index() = 0;
+
     virtual Status write_bloom_filter_index() = 0;
 
     virtual ordinal_t get_next_rowid() const = 0;
 
     // used for append not null data.
     virtual Status append_data(const uint8_t** ptr, size_t num_rows) = 0;
-
-    // used for append not null data. When page is full, will append data not reach num_rows.
-    virtual Status append_data_in_current_page(const uint8_t** ptr, size_t* num_rows) = 0;
-
-    // used for append not null data. When page is full, will append data not reach num_rows.
-    virtual Status append_data_in_current_page(const uint8_t* ptr, size_t* num_rows) = 0;
 
     bool is_nullable() const { return _is_nullable; }
 
@@ -142,30 +172,29 @@ public:
 private:
     std::unique_ptr<Field> _field;
     bool _is_nullable;
-
-protected:
-    std::shared_ptr<MemTracker> _mem_tracker;
+    std::vector<uint8_t> _null_bitmap;
 };
 
 class FlushPageCallback {
 public:
-    virtual Status put_extra_info_in_page(DataPageFooterPB* footer) { return Status::OK(); }
+    virtual ~FlushPageCallback() = default;
+    virtual void put_extra_info_in_page(DataPageFooterPB* footer) {}
 };
 
 // Encode one column's data into some memory slice.
 // Because some columns would be stored in a file, we should wait
 // until all columns has been finished, and then data can be written
 // to file
-class ScalarColumnWriter final : public ColumnWriter {
+class ScalarColumnWriter : public ColumnWriter {
 public:
     ScalarColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
-                       fs::WritableBlock* output_file);
+                       io::FileWriter* file_writer);
 
     ~ScalarColumnWriter() override;
 
     Status init() override;
 
-    inline Status append_nulls(size_t num_rows) override;
+    Status append_nulls(size_t num_rows) override;
 
     Status finish_current_page() override;
 
@@ -178,6 +207,7 @@ public:
     Status write_ordinal_index() override;
     Status write_zone_map() override;
     Status write_bitmap_index() override;
+    Status write_inverted_index() override;
     Status write_bloom_filter_index() override;
     ordinal_t get_next_rowid() const override { return _next_rowid; }
 
@@ -186,8 +216,18 @@ public:
     }
     Status append_data(const uint8_t** ptr, size_t num_rows) override;
 
-    Status append_data_in_current_page(const uint8_t** ptr, size_t* num_rows) override;
-    Status append_data_in_current_page(const uint8_t* ptr, size_t* num_rows) override;
+    // used for append not null data. When page is full, will append data not reach num_rows.
+    Status append_data_in_current_page(const uint8_t** ptr, size_t* num_written);
+
+    Status append_data_in_current_page(const uint8_t* ptr, size_t* num_written) {
+        RETURN_IF_CATCH_EXCEPTION(
+                { return _internal_append_data_in_current_page(ptr, num_written); });
+    }
+    friend class ArrayColumnWriter;
+    friend class OffsetColumnWriter;
+
+private:
+    Status _internal_append_data_in_current_page(const uint8_t* ptr, size_t* num_written);
 
 private:
     std::unique_ptr<PageBuilder> _page_builder;
@@ -209,77 +249,130 @@ private:
         // use vector for easier management for lifetime of OwnedSlice
         std::vector<OwnedSlice> data;
         PageFooterPB footer;
-        Page* next = nullptr;
     };
 
-    struct PageHead {
-        Page* head = nullptr;
-        Page* tail = nullptr;
-    };
-
-    void _push_back_page(Page* page) {
-        // add page to pages' tail
-        if (_pages.tail != nullptr) {
-            _pages.tail->next = page;
-        }
-        _pages.tail = page;
-        if (_pages.head == nullptr) {
-            _pages.head = page;
-        }
+    void _push_back_page(std::unique_ptr<Page> page) {
         for (auto& data_slice : page->data) {
             _data_size += data_slice.slice().size;
         }
         // estimate (page footer + footer size + checksum) took 20 bytes
         _data_size += 20;
+        // add page to pages' tail
+        _pages.emplace_back(std::move(page));
     }
 
     Status _write_data_page(Page* page);
 
 private:
-    fs::WritableBlock* _wblock = nullptr;
+    io::FileWriter* _file_writer = nullptr;
     // total size of data page list
     uint64_t _data_size;
 
     // cached generated pages,
-    PageHead _pages;
+    std::vector<std::unique_ptr<Page>> _pages;
     ordinal_t _first_rowid = 0;
 
-    const BlockCompressionCodec* _compress_codec = nullptr;
+    BlockCompressionCodec* _compress_codec;
 
     std::unique_ptr<OrdinalIndexWriter> _ordinal_index_builder;
     std::unique_ptr<ZoneMapIndexWriter> _zone_map_index_builder;
     std::unique_ptr<BitmapIndexWriter> _bitmap_index_builder;
+    std::unique_ptr<InvertedIndexColumnWriter> _inverted_index_builder;
     std::unique_ptr<BloomFilterIndexWriter> _bloom_filter_index_builder;
 
     // call before flush data page.
     FlushPageCallback* _new_page_callback = nullptr;
 };
 
-class ArrayColumnWriter final : public ColumnWriter, public FlushPageCallback {
+// offsetColumnWriter is used column which has offset column, like array, map.
+//  column type is only uint64 and should response for whole column value [start, end], end will set
+//  in footer.next_array_item_ordinal which in finish_cur_page() callback put_extra_info_in_page()
+class OffsetColumnWriter final : public ScalarColumnWriter, FlushPageCallback {
 public:
-    explicit ArrayColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
-                               ScalarColumnWriter* offset_writer, ScalarColumnWriter* null_writer,
-                               std::unique_ptr<ColumnWriter> item_writer);
-    ~ArrayColumnWriter() override = default;
+    OffsetColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
+                       io::FileWriter* file_writer);
+
+    ~OffsetColumnWriter() override;
 
     Status init() override;
 
     Status append_data(const uint8_t** ptr, size_t num_rows) override;
-    Status append_data_in_current_page(const uint8_t** ptr, size_t* num_rows) override {
-        return Status::NotSupported(
-                "array writer has no data, can not append_data_in_current_page");
-    }
-    Status append_data_in_current_page(const uint8_t* ptr, size_t* num_rows) override {
-        return Status::NotSupported(
-                "array writer has no data, can not append_data_in_current_page");
-    }
+
+private:
+    void put_extra_info_in_page(DataPageFooterPB* footer) override;
+
+    uint64_t _next_offset;
+};
+
+class StructColumnWriter final : public ColumnWriter {
+public:
+    explicit StructColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
+                                ScalarColumnWriter* null_writer,
+                                std::vector<std::unique_ptr<ColumnWriter>>& sub_column_writers);
+    ~StructColumnWriter() override = default;
+
+    Status init() override;
+
+    Status append_nullable(const uint8_t* null_map, const uint8_t** data, size_t num_rows) override;
+    Status append_data(const uint8_t** ptr, size_t num_rows) override;
 
     uint64_t estimate_buffer_size() override;
 
     Status finish() override;
     Status write_data() override;
     Status write_ordinal_index() override;
-    inline Status append_nulls(size_t num_rows) override;
+    Status append_nulls(size_t num_rows) override;
+
+    Status finish_current_page() override;
+
+    Status write_zone_map() override {
+        if (_opts.need_zone_map) {
+            return Status::NotSupported("struct not support zone map");
+        }
+        return Status::OK();
+    }
+
+    Status write_bitmap_index() override {
+        if (_opts.need_bitmap_index) {
+            return Status::NotSupported("struct not support bitmap index");
+        }
+        return Status::OK();
+    }
+    Status write_inverted_index() override;
+    Status write_bloom_filter_index() override {
+        if (_opts.need_bloom_filter) {
+            return Status::NotSupported("struct not support bloom filter index");
+        }
+        return Status::OK();
+    }
+
+    ordinal_t get_next_rowid() const override { return _sub_column_writers[0]->get_next_rowid(); }
+
+private:
+    size_t _num_sub_column_writers;
+    std::unique_ptr<ScalarColumnWriter> _null_writer;
+    std::vector<std::unique_ptr<ColumnWriter>> _sub_column_writers;
+    ColumnWriterOptions _opts;
+};
+
+class ArrayColumnWriter final : public ColumnWriter {
+public:
+    explicit ArrayColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
+                               OffsetColumnWriter* offset_writer, ScalarColumnWriter* null_writer,
+                               std::unique_ptr<ColumnWriter> item_writer);
+    ~ArrayColumnWriter() override = default;
+
+    Status init() override;
+
+    Status append_data(const uint8_t** ptr, size_t num_rows) override;
+
+    uint64_t estimate_buffer_size() override;
+
+    Status finish() override;
+    Status write_data() override;
+    Status write_ordinal_index() override;
+    Status append_nulls(size_t num_rows) override;
+    Status append_nullable(const uint8_t* null_map, const uint8_t** ptr, size_t num_rows) override;
 
     Status finish_current_page() override;
 
@@ -296,25 +389,79 @@ public:
         }
         return Status::OK();
     }
+    Status write_inverted_index() override;
     Status write_bloom_filter_index() override {
         if (_opts.need_bloom_filter) {
             return Status::NotSupported("array not support bloom filter index");
         }
         return Status::OK();
     }
-    ordinal_t get_next_rowid() const override { return _length_writer->get_next_rowid(); }
+    ordinal_t get_next_rowid() const override { return _offset_writer->get_next_rowid(); }
 
 private:
-    Status put_extra_info_in_page(DataPageFooterPB* header) override;
-    inline Status write_null_column(size_t num_rows, bool is_null); // 写入num_rows个null标记
+    Status write_null_column(size_t num_rows, bool is_null); // 写入num_rows个null标记
+    bool has_empty_items() const { return _item_writer->get_next_rowid() == 0; }
 
 private:
-    std::unique_ptr<ScalarColumnWriter> _length_writer;
+    std::unique_ptr<OffsetColumnWriter> _offset_writer;
     std::unique_ptr<ScalarColumnWriter> _null_writer;
     std::unique_ptr<ColumnWriter> _item_writer;
+    std::unique_ptr<InvertedIndexColumnWriter> _inverted_index_builder;
     ColumnWriterOptions _opts;
-    ordinal_t _current_length_page_first_ordinal = 0;
-    ordinal_t _lengh_sum_in_cur_page = 0;
+};
+
+class MapColumnWriter final : public ColumnWriter {
+public:
+    explicit MapColumnWriter(const ColumnWriterOptions& opts, std::unique_ptr<Field> field,
+                             ScalarColumnWriter* null_writer, OffsetColumnWriter* offsets_writer,
+                             std::vector<std::unique_ptr<ColumnWriter>>& _kv_writers);
+
+    ~MapColumnWriter() override = default;
+
+    Status init() override;
+
+    Status append_data(const uint8_t** ptr, size_t num_rows) override;
+    Status append_nullable(const uint8_t* null_map, const uint8_t** ptr, size_t num_rows) override;
+    uint64_t estimate_buffer_size() override;
+
+    Status finish() override;
+    Status write_data() override;
+    Status write_ordinal_index() override;
+    Status write_inverted_index() override;
+    Status append_nulls(size_t num_rows) override;
+
+    Status finish_current_page() override;
+
+    Status write_zone_map() override {
+        if (_opts.need_zone_map) {
+            return Status::NotSupported("map not support zone map");
+        }
+        return Status::OK();
+    }
+
+    Status write_bitmap_index() override {
+        if (_opts.need_bitmap_index) {
+            return Status::NotSupported("map not support bitmap index");
+        }
+        return Status::OK();
+    }
+    Status write_bloom_filter_index() override {
+        if (_opts.need_bloom_filter) {
+            return Status::NotSupported("map not support bloom filter index");
+        }
+        return Status::OK();
+    }
+
+    // according key writer to get next rowid
+    ordinal_t get_next_rowid() const override { return _offsets_writer->get_next_rowid(); }
+
+private:
+    std::vector<std::unique_ptr<ColumnWriter>> _kv_writers;
+    // we need null writer to make sure a row is null or not
+    std::unique_ptr<ScalarColumnWriter> _null_writer;
+    std::unique_ptr<OffsetColumnWriter> _offsets_writer;
+    std::unique_ptr<InvertedIndexColumnWriter> _inverted_index_builder;
+    ColumnWriterOptions _opts;
 };
 
 } // namespace segment_v2

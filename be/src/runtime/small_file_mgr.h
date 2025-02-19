@@ -15,20 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
-#define DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H
+#pragma once
 
 #include <stdint.h>
 
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <utility>
-#include <vector>
 
 #include "common/status.h"
-#include "gen_cpp/Types_types.h"
-#include "runtime/client_cache.h"
 
 namespace doris {
 
@@ -68,12 +63,10 @@ private:
 
 private:
     std::mutex _lock;
-    ExecEnv* _exec_env;
+    ExecEnv* _exec_env = nullptr;
     std::string _local_path;
     // file id -> small file
     std::unordered_map<int64_t, CacheEntry> _file_cache;
 };
 
 } // end namespace doris
-
-#endif // DORIS_BE_SRC_RUNTIME_SMALL_FILE_MGR_H

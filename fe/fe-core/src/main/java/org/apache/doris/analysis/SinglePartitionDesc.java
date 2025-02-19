@@ -22,7 +22,6 @@ import org.apache.doris.catalog.DataProperty;
 import org.apache.doris.catalog.ReplicaAllocation;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FeNameFormat;
-import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.thrift.TTabletType;
@@ -30,10 +29,11 @@ import org.apache.doris.thrift.TTabletType;
 import com.google.common.base.Joiner;
 import com.google.common.base.Joiner.MapJoiner;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
 
 import java.util.Map;
 
-public class SinglePartitionDesc {
+public class SinglePartitionDesc implements AllPartitionDesc {
     private boolean isAnalyzed;
 
     private boolean ifNotExists;
@@ -46,7 +46,9 @@ public class SinglePartitionDesc {
     private ReplicaAllocation replicaAlloc;
     private boolean isInMemory = false;
     private TTabletType tabletType = TTabletType.TABLET_TYPE_DISK;
-    private Pair<Long, Long> versionInfo;
+    private Long versionInfo;
+    private String storagePolicy;
+    private boolean isMutable;
 
     public SinglePartitionDesc(boolean ifNotExists, String partName, PartitionKeyDesc partitionKeyDesc,
                                Map<String, String> properties) {
@@ -58,8 +60,30 @@ public class SinglePartitionDesc {
         this.partitionKeyDesc = partitionKeyDesc;
         this.properties = properties;
 
-        this.partitionDataProperty = DataProperty.DEFAULT_DATA_PROPERTY;
+        this.partitionDataProperty = new DataProperty(DataProperty.DEFAULT_STORAGE_MEDIUM);
         this.replicaAlloc = ReplicaAllocation.DEFAULT_ALLOCATION;
+        this.storagePolicy = "";
+    }
+
+    /**
+     * for Nereids
+     */
+    public SinglePartitionDesc(boolean ifNotExists, String partName,
+            PartitionKeyDesc partitionKeyDesc, ReplicaAllocation replicaAlloc,
+            Map<String, String> properties, DataProperty partitionDataProperty, boolean isInMemory,
+            TTabletType tabletType, Long versionInfo, String storagePolicy, boolean isMutable) {
+        this.isAnalyzed = true;
+        this.ifNotExists = ifNotExists;
+        this.partName = partName;
+        this.partitionKeyDesc = partitionKeyDesc;
+        this.properties = properties;
+        this.partitionDataProperty = partitionDataProperty;
+        this.replicaAlloc = replicaAlloc;
+        this.isInMemory = isInMemory;
+        this.tabletType = tabletType;
+        this.versionInfo = versionInfo;
+        this.storagePolicy = storagePolicy;
+        this.isMutable = isMutable;
     }
 
     public boolean isSetIfNotExists() {
@@ -82,15 +106,23 @@ public class SinglePartitionDesc {
         return replicaAlloc;
     }
 
+    public void setReplicaAlloc(ReplicaAllocation replicaAlloc) {
+        this.replicaAlloc = replicaAlloc;
+    }
+
     public boolean isInMemory() {
         return isInMemory;
+    }
+
+    public boolean isMutable() {
+        return isMutable;
     }
 
     public TTabletType getTabletType() {
         return tabletType;
     }
 
-    public Pair<Long, Long> getVersionInfo() {
+    public Long getVersionInfo() {
         return versionInfo;
     }
 
@@ -103,17 +135,37 @@ public class SinglePartitionDesc {
             return;
         }
 
+        boolean hasStoragePolicy = false;
+        if (properties != null) {
+            hasStoragePolicy = properties.keySet().stream()
+                    .anyMatch(iter -> {
+                        boolean equal = iter.compareToIgnoreCase(PropertyAnalyzer.PROPERTIES_STORAGE_POLICY) == 0;
+                        // when find has storage policy properties, here will set it in partition
+                        if (equal) {
+                            storagePolicy = properties.get(iter);
+                        }
+                        return equal;
+                    });
+        }
+
         FeNameFormat.checkPartitionName(partName);
 
         partitionKeyDesc.analyze(partColNum);
 
+        Map<String, String> mergedMap = Maps.newHashMap();
+        // Should putAll `otherProperties` before `this.properties`,
+        // because the priority of partition is higher than table
         if (otherProperties != null) {
-            this.properties = otherProperties;
+            mergedMap.putAll(otherProperties);
         }
+        if (this.properties != null) {
+            mergedMap.putAll(this.properties);
+        }
+        this.properties = mergedMap;
 
         // analyze data property
         partitionDataProperty = PropertyAnalyzer.analyzeDataProperty(properties,
-                DataProperty.DEFAULT_DATA_PROPERTY);
+                new DataProperty(DataProperty.DEFAULT_STORAGE_MEDIUM));
         Preconditions.checkNotNull(partitionDataProperty);
 
         // analyze replication num
@@ -127,14 +179,22 @@ public class SinglePartitionDesc {
 
         // analyze in memory
         isInMemory = PropertyAnalyzer.analyzeBooleanProp(properties, PropertyAnalyzer.PROPERTIES_INMEMORY, false);
+        if (isInMemory == true) {
+            throw new AnalysisException("Not support set 'in_memory'='true' now!");
+        }
+
+        // analyze is mutable
+        isMutable = PropertyAnalyzer.analyzeBooleanProp(properties, PropertyAnalyzer.PROPERTIES_MUTABLE, true);
 
         tabletType = PropertyAnalyzer.analyzeTabletType(properties);
 
         if (otherProperties == null) {
             // check unknown properties
             if (properties != null && !properties.isEmpty()) {
-                MapJoiner mapJoiner = Joiner.on(", ").withKeyValueSeparator(" = ");
-                throw new AnalysisException("Unknown properties: " + mapJoiner.join(properties));
+                if (!hasStoragePolicy) {
+                    MapJoiner mapJoiner = Joiner.on(", ").withKeyValueSeparator(" = ");
+                    throw new AnalysisException("Unknown properties: " + mapJoiner.join(properties));
+                }
             }
         }
 
@@ -143,6 +203,14 @@ public class SinglePartitionDesc {
 
     public boolean isAnalyzed() {
         return this.isAnalyzed;
+    }
+
+    public void setAnalyzed(boolean analyzed) {
+        isAnalyzed = analyzed;
+    }
+
+    public String getStoragePolicy() {
+        return this.storagePolicy;
     }
 
     public String toSql() {

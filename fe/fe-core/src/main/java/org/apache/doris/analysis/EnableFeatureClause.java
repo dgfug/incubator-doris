@@ -20,8 +20,8 @@ package org.apache.doris.analysis;
 import org.apache.doris.alter.AlterOpType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
-
 import org.apache.doris.common.util.PrintableMap;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -33,6 +33,7 @@ public class EnableFeatureClause extends AlterTableClause {
     public enum Features {
         BATCH_DELETE,
         SEQUENCE_LOAD,
+        UPDATE_FLEXIBLE_COLUMNS,
         UNKNOWN
     }
 
@@ -79,9 +80,23 @@ public class EnableFeatureClause extends AlterTableClause {
                     throw new AnalysisException("Properties is not set");
                 }
                 break;
+            case "UPDATE_FLEXIBLE_COLUMNS":
+                this.needSchemaChange = true;
+                this.feature = Features.UPDATE_FLEXIBLE_COLUMNS;
+                break;
             default:
                 throw new AnalysisException("unknown feature name: " + featureName);
         }
+    }
+
+    @Override
+    public boolean allowOpMTMV() {
+        return true;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return false;
     }
 
     @Override

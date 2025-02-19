@@ -15,78 +15,174 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_RUNTIME_PREDICATE_H
-#define DORIS_BE_SRC_QUERY_EXPRS_RUNTIME_PREDICATE_H
+#pragma once
 
-#include <condition_variable>
-#include <list>
-#include <map>
-#include <mutex>
+#include <fmt/format.h>
+#include <gen_cpp/Exprs_types.h>
+#include <stdint.h>
 
-#include "exprs/expr_context.h"
-#include "gen_cpp/Exprs_types.h"
+#include <atomic>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "common/status.h"
+#include "runtime/decimalv2_value.h"
+#include "runtime/define_primitive_type.h"
+#include "runtime/large_int_value.h"
+#include "runtime/primitive_type.h"
+#include "runtime/query_context.h"
+#include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "util/runtime_profile.h"
+#include "util/time.h"
 #include "util/uid_util.h"
+#include "vec/common/string_ref.h"
+#include "vec/core/types.h"
+#include "vec/data_types/data_type.h"
+#include "vec/exprs/vexpr.h"
+#include "vec/runtime/vdatetime_value.h"
+
+namespace butil {
+class IOBufAsZeroCopyInputStream;
+}
 
 namespace doris {
-class Predicate;
-class ObjectPool;
-class ExprContext;
-class RuntimeState;
 class RuntimePredicateWrapper;
-class MemTracker;
-class TupleRow;
 class PPublishFilterRequest;
+class PPublishFilterRequestV2;
 class PMergeFilterRequest;
 class TRuntimeFilterDesc;
 class RowDescriptor;
+class PInFilter;
 class PMinMaxFilter;
-class HashJoinNode;
-class RuntimeProfile;
+class BloomFilterFuncBase;
+class BitmapFilterFuncBase;
+class TNetworkAddress;
+class TQueryOptions;
+
+namespace vectorized {
+class VExpr;
+class VExprContext;
+struct RuntimeFilterContextSPtr;
+} // namespace vectorized
+
+namespace pipeline {
+class RuntimeFilterTimer;
+class CountedFinishDependency;
+} // namespace pipeline
 
 enum class RuntimeFilterType {
     UNKNOWN_FILTER = -1,
     IN_FILTER = 0,
     MINMAX_FILTER = 1,
-    BLOOM_FILTER = 2
+    BLOOM_FILTER = 2,
+    IN_OR_BLOOM_FILTER = 3,
+    BITMAP_FILTER = 4,
+    MIN_FILTER = 5, // only min
+    MAX_FILTER = 6  // only max
 };
 
-inline std::string to_string(RuntimeFilterType type) {
-    switch (type) {
-    case RuntimeFilterType::IN_FILTER: {
-        return std::string("in");
+static RuntimeFilterType get_runtime_filter_type(const TRuntimeFilterDesc* desc) {
+    switch (desc->type) {
+    case TRuntimeFilterType::BLOOM: {
+        return RuntimeFilterType::BLOOM_FILTER;
     }
-    case RuntimeFilterType::BLOOM_FILTER: {
-        return std::string("bloomfilter");
+    case TRuntimeFilterType::MIN_MAX: {
+        if (desc->__isset.min_max_type) {
+            if (desc->min_max_type == TMinMaxRuntimeFilterType::MIN) {
+                return RuntimeFilterType::MIN_FILTER;
+            } else if (desc->min_max_type == TMinMaxRuntimeFilterType::MAX) {
+                return RuntimeFilterType::MAX_FILTER;
+            }
+        }
+        return RuntimeFilterType::MINMAX_FILTER;
     }
-    case RuntimeFilterType::MINMAX_FILTER: {
-        return std::string("minmax");
+    case TRuntimeFilterType::IN: {
+        return RuntimeFilterType::IN_FILTER;
     }
-    default:
-        return std::string("UNKNOWN");
+    case TRuntimeFilterType::IN_OR_BLOOM: {
+        return RuntimeFilterType::IN_OR_BLOOM_FILTER;
+    }
+    case TRuntimeFilterType::BITMAP: {
+        return RuntimeFilterType::BITMAP_FILTER;
+    }
+    default: {
+        throw doris::Exception(doris::ErrorCode::INTERNAL_ERROR, "Invalid runtime filter type!");
+    }
     }
 }
 
 enum class RuntimeFilterRole { PRODUCER = 0, CONSUMER = 1 };
 
 struct RuntimeFilterParams {
-    RuntimeFilterParams() : filter_type(RuntimeFilterType::UNKNOWN_FILTER), bloom_filter_size(-1) {}
+    RuntimeFilterParams()
+            : filter_type(RuntimeFilterType::UNKNOWN_FILTER),
+              bloom_filter_size(-1),
+              max_in_num(0),
+              filter_id(0),
+              bitmap_filter_not_in(false) {}
 
     RuntimeFilterType filter_type;
     PrimitiveType column_return_type;
     // used in bloom filter
     int64_t bloom_filter_size;
+    int32_t max_in_num;
+    int64_t runtime_bloom_filter_min_size;
+    int64_t runtime_bloom_filter_max_size;
+    int32_t filter_id;
+    bool bitmap_filter_not_in;
+    bool build_bf_exactly;
+
+    bool bloom_filter_size_calculated_by_ndv = false;
+    bool null_aware = false;
+};
+
+struct RuntimeFilterFuncBase {
+public:
+    void set_filter_id(int filter_id) {
+        if (_filter_id == -1) {
+            _filter_id = filter_id;
+        }
+    }
+
+    int get_filter_id() const { return _filter_id; }
+
+    bool is_runtime_filter() const { return _filter_id != -1; }
+
+    void set_null_aware(bool null_aware) { _null_aware = null_aware; }
+
+protected:
+    int _filter_id = -1;
+    bool _null_aware = false;
 };
 
 struct UpdateRuntimeFilterParams {
-    const PPublishFilterRequest* request;
-    const char* data;
+    UpdateRuntimeFilterParams(const PPublishFilterRequest* req,
+                              butil::IOBufAsZeroCopyInputStream* data_stream)
+            : request(req), data(data_stream) {}
+    const PPublishFilterRequest* request = nullptr;
+    butil::IOBufAsZeroCopyInputStream* data = nullptr;
+};
+
+struct UpdateRuntimeFilterParamsV2 {
+    const PPublishFilterRequestV2* request;
+    butil::IOBufAsZeroCopyInputStream* data;
+    PrimitiveType column_type = INVALID_TYPE;
 };
 
 struct MergeRuntimeFilterParams {
-    const PMergeFilterRequest* request;
-    const char* data;
+    MergeRuntimeFilterParams(const PMergeFilterRequest* req,
+                             butil::IOBufAsZeroCopyInputStream* data_stream)
+            : request(req), data(data_stream) {}
+    const PMergeFilterRequest* request = nullptr;
+    butil::IOBufAsZeroCopyInputStream* data = nullptr;
+};
+
+enum RuntimeFilterState {
+    READY,
+    NOT_READY,
+    TIME_OUT,
 };
 
 /// The runtimefilter is built in the join node.
@@ -96,128 +192,203 @@ struct MergeRuntimeFilterParams {
 /// that can be pushed down to node based on the results of the right table.
 class IRuntimeFilter {
 public:
-    IRuntimeFilter(RuntimeState* state, MemTracker* mem_tracker, ObjectPool* pool)
+    IRuntimeFilter(RuntimeFilterParamsContext* state, const TRuntimeFilterDesc* desc)
             : _state(state),
-              _mem_tracker(mem_tracker),
-              _pool(pool),
-              _runtime_filter_type(RuntimeFilterType::UNKNOWN_FILTER),
-              _filter_id(-1),
+              _filter_id(desc->filter_id),
               _is_broadcast_join(true),
               _has_remote_target(false),
               _has_local_target(false),
-              _is_ready(false),
+              _rf_state_atomic(RuntimeFilterState::NOT_READY),
               _role(RuntimeFilterRole::PRODUCER),
               _expr_order(-1),
-              _always_true(false),
-              _probe_ctx(nullptr),
-              _is_ignored(false) {}
+              registration_time_(MonotonicMillis()),
+              _wait_infinitely(_state->get_query_ctx()->runtime_filter_wait_infinitely()),
+              _rf_wait_time_ms(_state->get_query_ctx()->runtime_filter_wait_time_ms()),
+              _runtime_filter_type(get_runtime_filter_type(desc)),
+              _profile(new RuntimeProfile(fmt::format("RuntimeFilter: (id = {}, type = {})",
+                                                      _filter_id,
+                                                      to_string(_runtime_filter_type)))) {}
 
     ~IRuntimeFilter() = default;
 
-    static Status create(RuntimeState* state, MemTracker* tracker, ObjectPool* pool,
-                         const TRuntimeFilterDesc* desc, const RuntimeFilterRole role, int node_id,
-                         IRuntimeFilter** res);
+    static Status create(RuntimeFilterParamsContext* state, const TRuntimeFilterDesc* desc,
+                         const TQueryOptions* query_options, const RuntimeFilterRole role,
+                         int node_id, std::shared_ptr<IRuntimeFilter>* res);
+
+    RuntimeFilterContextSPtr& get_shared_context_ref();
 
     // insert data to build filter
-    // only used for producer
-    void insert(void* data);
+    void insert_batch(vectorized::ColumnPtr column, size_t start);
 
     // publish filter
     // push filter to remote node or push down it to scan_node
-    Status publish(HashJoinNode* hash_join_node, ExprContext* probe_ctx);
+    Status publish(RuntimeState* state, bool publish_local = false);
 
-    void publish_finally();
+    Status send_filter_size(RuntimeState* state, uint64_t local_filter_size);
 
     RuntimeFilterType type() const { return _runtime_filter_type; }
 
-    // get push down expr context
-    // This function can only be called once
-    // _wrapper's function will be clear
-    // only consumer could call this
-    Status get_push_expr_ctxs(std::list<ExprContext*>* push_expr_ctxs);
+    PrimitiveType column_type() const;
 
-    // This function is used by UT and producer
-    Status get_push_expr_ctxs(std::list<ExprContext*>* push_expr_ctxs, ExprContext* probe_ctx);
-
-    // This function can be called multiple times
-    Status get_prepared_context(std::vector<ExprContext*>* push_expr_ctxs,
-                                const RowDescriptor& desc,
-                                const std::shared_ptr<MemTracker>& tracker);
+    Status get_push_expr_ctxs(std::list<vectorized::VExprContextSPtr>& probe_ctxs,
+                              std::vector<vectorized::VRuntimeFilterPtr>& push_exprs,
+                              bool is_late_arrival);
 
     bool is_broadcast_join() const { return _is_broadcast_join; }
 
     bool has_remote_target() const { return _has_remote_target; }
 
-    bool is_ready() const { return _is_ready; }
+    bool has_local_target() const { return _has_local_target; }
+
+    bool is_ready() const {
+        return _rf_state_atomic.load(std::memory_order_acquire) == RuntimeFilterState::READY;
+    }
+    RuntimeFilterState current_state() const {
+        return _rf_state_atomic.load(std::memory_order_acquire);
+    }
 
     bool is_producer() const { return _role == RuntimeFilterRole::PRODUCER; }
     bool is_consumer() const { return _role == RuntimeFilterRole::CONSUMER; }
     void set_role(const RuntimeFilterRole role) { _role = role; }
-    int expr_order() { return _expr_order; }
+    int expr_order() const { return _expr_order; }
 
-    // only used for consumer
-    // if filter is not ready for filter data scan_node
-    // will wait util it ready or timeout
-    // This function will wait at most config::runtime_filter_shuffle_wait_time_ms
-    // if return true , filter is ready to use
-    bool await();
+    void update_state();
     // this function will be called if a runtime filter sent by rpc
-    // it will nodify all wait threads
+    // it will notify all wait threads
     void signal();
 
     // init filter with desc
-    Status init_with_desc(const TRuntimeFilterDesc* desc, int node_id = -1);
+    Status init_with_desc(const TRuntimeFilterDesc* desc, const TQueryOptions* options,
+                          int node_id = -1);
 
     // serialize _wrapper to protobuf
     Status serialize(PMergeFilterRequest* request, void** data, int* len);
     Status serialize(PPublishFilterRequest* request, void** data = nullptr, int* len = nullptr);
+    Status serialize(PPublishFilterRequestV2* request, void** data = nullptr, int* len = nullptr);
 
     Status merge_from(const RuntimePredicateWrapper* wrapper);
 
-    static Status create_wrapper(const MergeRuntimeFilterParams* param, MemTracker* tracker,
-                                 ObjectPool* pool,
+    static Status create_wrapper(const MergeRuntimeFilterParams* param,
                                  std::unique_ptr<RuntimePredicateWrapper>* wrapper);
-    static Status create_wrapper(const UpdateRuntimeFilterParams* param, MemTracker* tracker,
-                                 ObjectPool* pool,
+    static Status create_wrapper(const UpdateRuntimeFilterParams* param,
                                  std::unique_ptr<RuntimePredicateWrapper>* wrapper);
 
-    Status update_filter(const UpdateRuntimeFilterParams* param);
+    static Status create_wrapper(const UpdateRuntimeFilterParamsV2* param,
+                                 std::shared_ptr<RuntimePredicateWrapper>* wrapper);
+    Status change_to_bloom_filter();
+    Status init_bloom_filter(const size_t build_bf_cardinality);
+    void update_filter(std::shared_ptr<RuntimePredicateWrapper> filter_wrapper, int64_t merge_time,
+                       int64_t start_apply, uint64_t local_merge_time);
 
-    void set_ignored() { _is_ignored = true; }
+    void set_ignored();
 
-    // consumer should call before released
-    Status consumer_close();
+    bool get_ignored();
+
+    void set_disabled();
+    bool get_disabled() const;
+
+    RuntimeFilterType get_real_type();
+
+    bool need_sync_filter_size();
 
     // async push runtimefilter to remote node
-    Status push_to_remote(RuntimeState* state, const TNetworkAddress* addr);
-    Status join_rpc();
+    Status push_to_remote(RuntimeState* state, const TNetworkAddress* addr,
+                          uint64_t local_merge_time);
 
     void init_profile(RuntimeProfile* parent_profile);
 
-    void set_push_down_profile();
+    std::string debug_string() const;
 
-    void ready_for_publish();
+    void update_runtime_filter_type_to_profile(uint64_t local_merge_time);
+
+    int filter_id() const { return _filter_id; }
+
+    static std::string to_string(RuntimeFilterType type) {
+        switch (type) {
+        case RuntimeFilterType::IN_FILTER: {
+            return std::string("in");
+        }
+        case RuntimeFilterType::BLOOM_FILTER: {
+            return std::string("bloomfilter");
+        }
+        case RuntimeFilterType::MIN_FILTER: {
+            return std::string("only_min");
+        }
+        case RuntimeFilterType::MAX_FILTER: {
+            return std::string("only_max");
+        }
+        case RuntimeFilterType::MINMAX_FILTER: {
+            return std::string("minmax");
+        }
+        case RuntimeFilterType::IN_OR_BLOOM_FILTER: {
+            return std::string("in_or_bloomfilter");
+        }
+        case RuntimeFilterType::BITMAP_FILTER: {
+            return std::string("bitmapfilter");
+        }
+        default:
+            return std::string("UNKNOWN");
+        }
+    }
+
+    // For pipelineX & Producer
+    int32_t wait_time_ms() const {
+        int32_t res = 0;
+        if (wait_infinitely()) {
+            res = _state->get_query_ctx()->execution_timeout();
+            // Convert to ms
+            res *= 1000;
+        } else {
+            res = _rf_wait_time_ms;
+        }
+        return res;
+    }
+
+    bool wait_infinitely() const;
+
+    int64_t registration_time() const { return registration_time_; }
+
+    void set_filter_timer(std::shared_ptr<pipeline::RuntimeFilterTimer>);
+    std::string formatted_state() const;
+
+    void set_synced_size(uint64_t global_size);
+
+    void set_finish_dependency(
+            const std::shared_ptr<pipeline::CountedFinishDependency>& dependency);
+
+    int64_t get_synced_size() const {
+        if (_synced_size == -1 || !_dependency) {
+            throw Exception(doris::ErrorCode::INTERNAL_ERROR,
+                            "sync filter size meet error, filter: {}", debug_string());
+        }
+        return _synced_size;
+    }
 
 protected:
     // serialize _wrapper to protobuf
+    void to_protobuf(PInFilter* filter);
     void to_protobuf(PMinMaxFilter* filter);
 
     template <class T>
-    Status _serialize(T* request, void** data, int* len);
+    Status serialize_impl(T* request, void** data, int* len);
 
     template <class T>
-    static Status _create_wrapper(const T* param, MemTracker* tracker, ObjectPool* pool,
+    static Status _create_wrapper(const T* param,
                                   std::unique_ptr<RuntimePredicateWrapper>* wrapper);
 
-protected:
-    RuntimeState* _state;
-    MemTracker* _mem_tracker;
-    ObjectPool* _pool;
+    void _set_push_down(bool push_down) { _is_push_down = push_down; }
+
+    std::string _get_explain_state_string() const {
+        return _rf_state_atomic.load(std::memory_order_acquire) == RuntimeFilterState::READY
+                       ? "READY"
+               : _rf_state_atomic.load(std::memory_order_acquire) == RuntimeFilterState::TIME_OUT
+                       ? "TIME_OUT"
+                       : "NOT_READY";
+    }
+
+    RuntimeFilterParamsContext* _state = nullptr;
     // _wrapper is a runtime filter function wrapper
-    // _wrapper should alloc from _pool
-    RuntimePredicateWrapper* _wrapper;
-    // runtime filter type
-    RuntimeFilterType _runtime_filter_type;
+    std::shared_ptr<RuntimePredicateWrapper> _wrapper;
     // runtime filter id
     int _filter_id;
     // Specific types BoardCast or Shuffle
@@ -227,7 +398,7 @@ protected:
     // will apply to local node
     bool _has_local_target;
     // filter is ready for consumer
-    bool _is_ready;
+    std::atomic<RuntimeFilterState> _rf_state_atomic;
     // role consumer or producer
     RuntimeFilterRole _role;
     // expr index
@@ -235,37 +406,29 @@ protected:
     // used for await or signal
     std::mutex _inner_mutex;
     std::condition_variable _inner_cv;
+    bool _is_push_down = false;
+    TExpr _probe_expr;
 
-    // if set always_true = true
-    // this filter won't filter any data
-    bool _always_true;
+    /// Time in ms (from MonotonicMillis()), that the filter was registered.
+    const int64_t registration_time_;
+    /// runtime filter wait time will be ignored if wait_infinitely is true
+    const bool _wait_infinitely;
+    const int32_t _rf_wait_time_ms;
 
-    // build expr_context
-    // ExprContext* _build_ctx;
-    // probe expr_context
-    // it only used in consumer to generate runtime_filter expr_context
-    // we don't have to prepare it or close it
-    ExprContext* _probe_ctx;
-
-    // Indicate whether runtime filter expr has been ignored
-    bool _is_ignored;
-
-    // some runtime filter will generate
-    // multiple contexts such as minmax filter
-    // these context is called prepared by this,
-    // consumer_close should be called before release
-    std::vector<ExprContext*> _push_down_ctxs;
-
-    struct rpc_context;
-    std::shared_ptr<rpc_context> _rpc_context;
-
+    std::atomic<bool> _profile_init = false;
+    // runtime filter type
+    RuntimeFilterType _runtime_filter_type;
     // parent profile
     // only effect on consumer
     std::unique_ptr<RuntimeProfile> _profile;
-    // unix millis
-    RuntimeProfile::Counter* _await_time_cost = nullptr;
-    RuntimeProfile::Counter* _effect_time_cost = nullptr;
-    std::unique_ptr<ScopedTimer<MonotonicStopWatch>> _effect_timer;
+    RuntimeProfile::Counter* _wait_timer = nullptr;
+
+    std::vector<std::shared_ptr<pipeline::RuntimeFilterTimer>> _filter_timer;
+
+    int64_t _synced_size = -1;
+    std::shared_ptr<pipeline::CountedFinishDependency> _dependency;
+
+    bool _enable_fixed_len_to_uint32_v2 = false;
 };
 
 // avoid expose RuntimePredicateWrapper
@@ -280,47 +443,115 @@ private:
     WrapperPtr _wrapper;
 };
 
-/// this class used in a hash join node
-/// Provide a unified interface for other classes
-class RuntimeFilterSlots {
+// This class is a wrapper of runtime predicate function
+class RuntimePredicateWrapper {
 public:
-    RuntimeFilterSlots(const std::vector<ExprContext*>& prob_expr_ctxs,
-                       const std::vector<ExprContext*>& build_expr_ctxs,
-                       const std::vector<TRuntimeFilterDesc>& runtime_filter_descs)
-            : _probe_expr_context(prob_expr_ctxs),
-              _build_expr_context(build_expr_ctxs),
-              _runtime_filter_descs(runtime_filter_descs) {}
+    RuntimePredicateWrapper(const RuntimeFilterParams* params)
+            : RuntimePredicateWrapper(params->column_return_type, params->filter_type,
+                                      params->filter_id) {};
+    // for a 'tmp' runtime predicate wrapper
+    // only could called assign method or as a param for merge
+    RuntimePredicateWrapper(PrimitiveType column_type, RuntimeFilterType type, uint32_t filter_id)
+            : _column_return_type(column_type),
+              _filter_type(type),
+              _context(new RuntimeFilterContext()),
+              _filter_id(filter_id) {}
 
-    Status init(RuntimeState* state, ObjectPool* pool, MemTracker* tracker,
-                int64_t hash_table_size);
+    // init runtime filter wrapper
+    // alloc memory to init runtime filter function
+    Status init(const RuntimeFilterParams* params);
 
-    void insert(TupleRow* row) {
-        for (int i = 0; i < _build_expr_context.size(); ++i) {
-            auto iter = _runtime_filters.find(i);
-            if (iter != _runtime_filters.end()) {
-                void* val = _build_expr_context[i]->get_value(row);
-                if (val != nullptr) {
-                    for (auto filter : iter->second) {
-                        filter->insert(val);
-                    }
-                }
-            }
+    Status change_to_bloom_filter();
+
+    Status init_bloom_filter(const size_t build_bf_cardinality);
+
+    bool get_build_bf_cardinality() const;
+
+    void insert_to_bloom_filter(BloomFilterFuncBase* bloom_filter) const;
+
+    BloomFilterFuncBase* get_bloomfilter() const { return _context->bloom_filter_func.get(); }
+
+    void insert_fixed_len(const vectorized::ColumnPtr& column, size_t start);
+
+    void insert_batch(const vectorized::ColumnPtr& column, size_t start) {
+        if (get_real_type() == RuntimeFilterType::BITMAP_FILTER) {
+            bitmap_filter_insert_batch(column, start);
+        } else {
+            insert_fixed_len(column, start);
         }
     }
 
-    // should call this method after insert
-    void ready_for_publish();
-    // publish runtime filter
-    void publish(HashJoinNode* hash_join_node);
+    void bitmap_filter_insert_batch(const vectorized::ColumnPtr column, size_t start);
+
+    RuntimeFilterType get_real_type() const {
+        if (_filter_type == RuntimeFilterType::IN_OR_BLOOM_FILTER) {
+            if (_context->hybrid_set) {
+                return RuntimeFilterType::IN_FILTER;
+            }
+            return RuntimeFilterType::BLOOM_FILTER;
+        }
+        return _filter_type;
+    }
+
+    size_t get_bloom_filter_size() const;
+
+    Status get_push_exprs(std::list<vectorized::VExprContextSPtr>& probe_ctxs,
+                          std::vector<vectorized::VRuntimeFilterPtr>& push_exprs,
+                          const TExpr& probe_expr);
+
+    Status merge(const RuntimePredicateWrapper* wrapper);
+
+    Status assign(const PInFilter* in_filter, bool contain_null);
+
+    void set_enable_fixed_len_to_uint32_v2();
+
+    // used by shuffle runtime filter
+    // assign this filter by protobuf
+    Status assign(const PBloomFilter* bloom_filter, butil::IOBufAsZeroCopyInputStream* data,
+                  bool contain_null);
+
+    // used by shuffle runtime filter
+    // assign this filter by protobuf
+    Status assign(const PMinMaxFilter* minmax_filter, bool contain_null);
+
+    void get_bloom_filter_desc(char** data, int* filter_length);
+
+    PrimitiveType column_type() { return _column_return_type; }
+
+    bool is_bloomfilter() const { return get_real_type() == RuntimeFilterType::BLOOM_FILTER; }
+
+    bool contain_null() const;
+
+    bool is_ignored() const { return _context->ignored; }
+
+    void set_ignored() { _context->ignored = true; }
+
+    bool is_disabled() const { return _context->disabled; }
+
+    void set_disabled();
+
+    void batch_assign(const PInFilter* filter,
+                      void (*assign_func)(std::shared_ptr<HybridSetBase>& _hybrid_set,
+                                          PColumnValue&));
+
+    size_t get_in_filter_size() const;
+
+    std::shared_ptr<BitmapFilterFuncBase> get_bitmap_filter() const {
+        return _context->bitmap_filter_func;
+    }
+
+    friend class IRuntimeFilter;
+
+    void set_filter_id(int id);
 
 private:
-    const std::vector<ExprContext*>& _probe_expr_context;
-    const std::vector<ExprContext*>& _build_expr_context;
-    const std::vector<TRuntimeFilterDesc>& _runtime_filter_descs;
-    // prob_contition index -> [IRuntimeFilter]
-    std::map<int, std::list<IRuntimeFilter*>> _runtime_filters;
+    // When a runtime filter received from remote and it is a bloom filter, _column_return_type will be invalid.
+    PrimitiveType _column_return_type; // column type
+    RuntimeFilterType _filter_type;
+    int32_t _max_in_num = -1;
+
+    RuntimeFilterContextSPtr _context;
+    uint32_t _filter_id;
 };
 
 } // namespace doris
-
-#endif

@@ -20,34 +20,34 @@ package org.apache.doris.load.sync.canal;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.Status;
 import org.apache.doris.common.UserException;
-import org.apache.doris.load.sync.position.EntryPosition;
-import org.apache.doris.load.sync.model.Events;
-import org.apache.doris.load.sync.position.PositionMeta;
-import org.apache.doris.load.sync.position.PositionRange;
 import org.apache.doris.load.sync.SyncChannelHandle;
 import org.apache.doris.load.sync.SyncDataConsumer;
 import org.apache.doris.load.sync.SyncFailMsg;
+import org.apache.doris.load.sync.model.Events;
+import org.apache.doris.load.sync.position.EntryPosition;
+import org.apache.doris.load.sync.position.PositionMeta;
+import org.apache.doris.load.sync.position.PositionRange;
 
 import com.alibaba.otter.canal.client.CanalConnector;
 import com.alibaba.otter.canal.common.CanalException;
 import com.alibaba.otter.canal.protocol.CanalEntry;
 import com.alibaba.otter.canal.protocol.Message;
-
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -442,10 +442,11 @@ public class CanalSyncDataConsumer extends SyncDataConsumer {
         long ackTime = positionMeta.getAckTime();
         StringBuilder sb = new StringBuilder();
         if (ackPosition != null) {
-            SimpleDateFormat format = new SimpleDateFormat(DATE_FORMAT);
+            DateTimeFormatter format = DateTimeFormatter.ofPattern(DATE_FORMAT).withZone(ZoneId.systemDefault());
             long executeTime = ackPosition.getExecuteTime();
             long delayTime = ackTime - executeTime;
-            Date date = new Date(executeTime);
+            LocalDateTime date = LocalDateTime.ofInstant(Instant.ofEpochMilli(System.currentTimeMillis()),
+                    ZoneId.systemDefault());
             sb.append("position:").append(ackPosition)
                     .append(", executeTime:[").append(format.format(date)).append("], ")
                     .append("delay:").append(delayTime).append("ms");

@@ -15,36 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_HTTP_ACTION_META_ACTION_H
-#define DORIS_BE_SRC_HTTP_ACTION_META_ACTION_H
+#pragma once
+
+#include <string>
 
 #include "common/status.h"
-#include "http/http_handler.h"
+#include "http/http_handler_with_auth.h"
 
 namespace doris {
 
-class ExecEnv;
-
-enum META_TYPE {
-    HEADER = 1,
-};
+class HttpRequest;
 
 // Get Meta Info
-class MetaAction : public HttpHandler {
+class MetaAction : public HttpHandlerWithAuth {
 public:
-    MetaAction(META_TYPE meta_type) : _meta_type(meta_type) {}
+    MetaAction(ExecEnv* exec_env, TPrivilegeHier::type hier, TPrivilegeType::type type);
 
-    virtual ~MetaAction() {}
+    ~MetaAction() override = default;
 
     void handle(HttpRequest* req) override;
 
 private:
     Status _handle_header(HttpRequest* req, std::string* json_header);
-
-private:
-    META_TYPE _meta_type;
 };
 
 } // end namespace doris
-
-#endif // DORIS_BE_SRC_HTTP_ACTION_META_ACTION_H

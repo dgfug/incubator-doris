@@ -14,10 +14,15 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/SelectListItem.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import com.google.common.base.Preconditions;
+
+import java.util.List;
 
 public class SelectListItem {
     private Expr expr;
@@ -59,7 +64,7 @@ public class SelectListItem {
     }
 
     // select list item corresponding to "[[db.]tbl.]*"
-    static public SelectListItem createStarItem(TableName tblName) {
+    public static SelectListItem createStarItem(TableName tblName) {
         return new SelectListItem(tblName);
     }
 
@@ -74,7 +79,11 @@ public class SelectListItem {
     public Expr getExpr() {
         return expr;
     }
-    public void setExpr(Expr expr) { this.expr = expr; }
+
+    public void setExpr(Expr expr) {
+        this.expr = expr;
+    }
+
     public String getAlias() {
         return alias;
     }
@@ -94,8 +103,24 @@ public class SelectListItem {
         }
     }
 
+    public String toDigest() {
+        if (!isStar) {
+            Preconditions.checkNotNull(expr);
+            String aliasSql = null;
+            if (alias != null) {
+                aliasSql = "`" + alias + "`";
+            }
+            return expr.toDigest() + ((aliasSql == null) ? "" : " " + aliasSql);
+        } else if (tblName != null) {
+            return tblName.toString() + ".*";
+        } else {
+            return "*";
+        }
+    }
+
     /**
-     * Return a column label for the select list item.
+     * Return a column label for the select list item. Without generate column name
+     * automatically.
      */
     public String toColumnLabel() {
         Preconditions.checkState(!isStar());
@@ -110,4 +135,29 @@ public class SelectListItem {
         return expr.toColumnLabel();
     }
 
+    /**
+     * Return a column label for the select list item. Support to generate
+     * column label automatically when can not get the column label exactly.
+     * Need the position of selectListItem to generate column label
+     */
+    public String toColumnLabel(int position) {
+        Preconditions.checkState(!isStar(), "select item should not be star when get column label");
+        if (alias != null) {
+            return alias;
+        }
+        if (expr instanceof SlotRef) {
+            return expr.getExprName();
+        }
+        return "__" + expr.getExprName() + "_" + position;
+    }
+
+    public List<String> toSubColumnLabels() {
+        Preconditions.checkState(!isStar());
+        return expr.toSubColumnLabel();
+    }
+
+
+    public void setAlias(String alias) {
+        this.alias = alias;
+    }
 }

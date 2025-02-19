@@ -17,28 +17,23 @@
 
 package org.apache.doris.common.proc;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.clone.ClusterLoadStatistic;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.clone.LoadStatisticForTag;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.resource.Tag;
 import org.apache.doris.system.Backend;
 import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Table;
-
-import java.util.List;
-import java.util.Map;
 
 // show proc "/cluster_balance/cluster_load_stat/location_default/HDD";
 public class ClusterLoadStatisticProcDir implements ProcDirInterface {
     public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
-            .add("BeId").add("Cluster").add("Available").add("UsedCapacity").add("Capacity")
+            .add("BeId").add("Available").add("UsedCapacity").add("Capacity").add("MaxDisk")
             .add("UsedPercent").add("ReplicaNum").add("CapCoeff").add("ReplCoeff").add("Score")
             .add("Class")
             .build();
 
-    private Table<String, Tag, ClusterLoadStatistic> statMap;
     private Tag tag;
     private TStorageMedium medium;
 
@@ -52,14 +47,10 @@ public class ClusterLoadStatisticProcDir implements ProcDirInterface {
         BaseProcResult result = new BaseProcResult();
         result.setNames(TITLE_NAMES);
 
-        statMap = Catalog.getCurrentCatalog().getTabletScheduler().getStatisticMap();
-        Map<String, ClusterLoadStatistic> map = statMap.column(tag);
+        LoadStatisticForTag loadStatisticForTag = Env.getCurrentEnv()
+                .getTabletScheduler().getStatisticMap().get(tag);
 
-        map.values().forEach(t -> {
-            List<List<String>> statistics = t.getClusterStatistic(medium);
-            statistics.forEach(result::addRow);
-        });
-
+        loadStatisticForTag.getStatistic(medium).forEach(result::addRow);
         return result;
     }
 
@@ -77,11 +68,13 @@ public class ClusterLoadStatisticProcDir implements ProcDirInterface {
             throw new AnalysisException("Invalid be id format: " + beIdStr);
         }
 
-        Backend be = Catalog.getCurrentSystemInfo().getBackend(beId);
+        Backend be = Env.getCurrentSystemInfo().getBackend(beId);
         if (be == null) {
             throw new AnalysisException("backend " + beId + " does not exist");
         }
-        return new BackendProcNode(be);
+        LoadStatisticForTag loadStatisticForTag = Env.getCurrentEnv()
+                .getTabletScheduler().getStatisticMap().get(tag);
+        return new BackendLoadStatisticProcNode(loadStatisticForTag, beId);
     }
 
 }

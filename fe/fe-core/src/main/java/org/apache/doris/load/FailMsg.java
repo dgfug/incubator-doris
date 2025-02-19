@@ -20,6 +20,8 @@ package org.apache.doris.load;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 
+import com.google.gson.annotations.SerializedName;
+
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
@@ -35,8 +37,10 @@ public class FailMsg implements Writable {
         UNKNOWN,
         TXN_UNKNOWN // cancelled because txn status is unknown
     }
-    
+
+    @SerializedName(value = "ct")
     private CancelType cancelType;
+    @SerializedName(value = "m")
     private String msg = "";
 
     public FailMsg() {
@@ -46,7 +50,7 @@ public class FailMsg implements Writable {
     public FailMsg(CancelType cancelType) {
         this.cancelType = cancelType;
     }
-    
+
     public FailMsg(CancelType cancelType, String msg) {
         this.cancelType = cancelType;
         this.msg = msg;
@@ -77,22 +81,23 @@ public class FailMsg implements Writable {
         Text.writeString(out, cancelType.name());
         Text.writeString(out, msg);
     }
+
     public void readFields(DataInput in) throws IOException {
         cancelType = CancelType.valueOf(Text.readString(in));
         msg = Text.readString(in);
     }
-    
+
     public boolean equals(Object obj) {
         if (obj == this) {
             return true;
         }
-        
+
         if (!(obj instanceof FailMsg)) {
             return false;
         }
-        
+
         FailMsg failMsg = (FailMsg) obj;
-        
+
         return cancelType.equals(failMsg.cancelType)
                 && msg.equals(failMsg.msg);
     }

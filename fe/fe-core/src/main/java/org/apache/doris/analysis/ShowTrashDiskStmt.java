@@ -17,28 +17,29 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.proc.TrashProcNode;
-import org.apache.doris.qe.ShowResultSetMetaData;
-import org.apache.doris.qe.ConnectContext;
-import org.apache.doris.system.Backend;
+import org.apache.doris.common.util.NetUtils;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.qe.ConnectContext;
+import org.apache.doris.qe.ShowResultSetMetaData;
+import org.apache.doris.system.Backend;
 
 import com.google.common.collect.ImmutableMap;
 
-public class ShowTrashDiskStmt extends ShowStmt {
+public class ShowTrashDiskStmt extends ShowStmt implements NotFallbackInParser {
 
     private Backend backend;
 
-    public ShowTrashDiskStmt(String backendQuery) {
-        ImmutableMap<Long, Backend> backendsInfo = Catalog.getCurrentSystemInfo().getIdToBackend();
+    public ShowTrashDiskStmt(String backendQuery) throws AnalysisException {
+        ImmutableMap<Long, Backend> backendsInfo = Env.getCurrentSystemInfo().getAllBackendsByAllCluster();
         for (Backend backend : backendsInfo.values()) {
-            String backendStr = String.valueOf(backend.getHost()) + ":" + String.valueOf(backend.getHeartbeatPort());
+            String backendStr = NetUtils.getHostPortInAccessibleFormat(backend.getHost(), backend.getHeartbeatPort());
             if (backendQuery.equals(backendStr)) {
                 this.backend = backend;
                 break;
@@ -52,8 +53,8 @@ public class ShowTrashDiskStmt extends ShowStmt {
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)
-                && !Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(),
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)
+                && !Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(),
                         PrivPredicate.OPERATOR)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN/OPERATOR");
         }

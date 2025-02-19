@@ -16,7 +16,16 @@
 // under the License.
 #include "runtime/cache/result_node.h"
 
-#include "gen_cpp/internal_service.pb.h"
+#include <gen_cpp/internal_service.pb.h>
+#include <gen_cpp/types.pb.h>
+#include <glog/logging.h>
+
+#include <iostream>
+#include <limits>
+#include <utility>
+
+#include "common/config.h"
+#include "olap/olap_define.h"
 #include "runtime/cache/cache_utils.h"
 
 namespace doris {
@@ -27,7 +36,7 @@ bool compare_partition(const PartitionRowBatch* left_node, const PartitionRowBat
 
 //return new batch size,only include the size of PRowBatch
 void PartitionRowBatch::set_row_batch(const PCacheValue& value) {
-    if (_cache_value != NULL && !check_newer(value.param())) {
+    if (_cache_value != nullptr && !check_newer(value.param())) {
         LOG(WARNING) << "set old version data, cache ver:" << _cache_value->param().last_version()
                      << ",cache time:" << _cache_value->param().last_version_time()
                      << ", setdata ver:" << value.param().last_version()
@@ -84,8 +93,9 @@ PCacheStatus ResultNode::update_partition(const PUpdateCacheRequest* request,
     }
 }
 
-PCacheStatus ResultNode::update_sql_cache(const PUpdateCacheRequest *request, bool &is_update_firstkey) {
-    PartitionRowBatch* partition = NULL;
+PCacheStatus ResultNode::update_sql_cache(const PUpdateCacheRequest* request,
+                                          bool& is_update_firstkey) {
+    PartitionRowBatch* partition = nullptr;
     if (request->values_size() > 1) {
         return PCacheStatus::PARAM_ERROR;
     }
@@ -120,14 +130,15 @@ PCacheStatus ResultNode::update_sql_cache(const PUpdateCacheRequest *request, bo
     return PCacheStatus::CACHE_OK;
 }
 
-PCacheStatus ResultNode::update_partition_cache(const PUpdateCacheRequest *request, bool &is_update_firstkey) {
-    PartitionKey first_key = kint64max;
+PCacheStatus ResultNode::update_partition_cache(const PUpdateCacheRequest* request,
+                                                bool& is_update_firstkey) {
+    PartitionKey first_key = std::numeric_limits<long>::max();
     if (_partition_list.size() == 0) {
         is_update_firstkey = true;
     } else {
         first_key = (*(_partition_list.begin()))->get_partition_key();
     }
-    PartitionRowBatch* partition = NULL;
+    PartitionRowBatch* partition = nullptr;
     for (int i = 0; i < request->values_size(); i++) {
         const PCacheValue& value = request->values(i);
         PartitionKey partition_key = value.param().partition_key();
@@ -322,8 +333,8 @@ void ResultNode::unlink() {
     if (_prev) {
         _prev->set_next(_next);
     }
-    _next = NULL;
-    _prev = NULL;
+    _next = nullptr;
+    _prev = nullptr;
 }
 
 } // namespace doris

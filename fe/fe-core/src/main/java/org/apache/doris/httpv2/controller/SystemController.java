@@ -18,7 +18,7 @@
 package org.apache.doris.httpv2.controller;
 
 import org.apache.doris.analysis.RedirectStatus;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.proc.ProcDirInterface;
 import org.apache.doris.common.proc.ProcNodeInterface;
@@ -35,7 +35,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.apache.commons.validator.routines.UrlValidator;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -50,7 +49,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-
 import javax.servlet.http.HttpServletRequest;
 
 @RestController
@@ -66,8 +64,10 @@ public class SystemController extends BaseController {
         if (Strings.isNullOrEmpty(currentPath)) {
             currentPath = "/";
         }
-        LOG.debug("get /system request, thread id: {}", Thread.currentThread().getId());
-        ResponseEntity entity = appendSystemInfo(currentPath, currentPath,request);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("get /system request, thread id: {}", Thread.currentThread().getId());
+        }
+        ResponseEntity entity = appendSystemInfo(currentPath, currentPath, request);
         return entity;
     }
 
@@ -89,7 +89,6 @@ public class SystemController extends BaseController {
 
     private ResponseEntity appendSystemInfo(String procPath, String path, HttpServletRequest request) {
         UrlValidator validator = new UrlValidator();
-        Map<String, Object> map = new HashMap<>();
 
         ProcNodeInterface procNode = getProcNode(procPath);
         if (procNode == null) {
@@ -99,7 +98,7 @@ public class SystemController extends BaseController {
 
         List<String> columnNames = null;
         List<List<String>> rows = null;
-        if (!Catalog.getCurrentCatalog().isMaster()) {
+        if (!Env.getCurrentEnv().isMaster()) {
             // forward to master
             String showProcStmt = "SHOW PROC \"" + procPath + "\"";
 
@@ -193,6 +192,10 @@ public class SystemController extends BaseController {
         if (path == null) {
             return "/rest/v1/system";
         } else {
+            final String windowsFileSystemSeparator = "\\";
+            if (windowsFileSystemSeparator.equals(path.getFileSystem().getSeparator())) {
+                return "/rest/v1/system?path=" + path.toString().replace("\\", "/");
+            }
             return "/rest/v1/system?path=" + path.toString();
         }
     }

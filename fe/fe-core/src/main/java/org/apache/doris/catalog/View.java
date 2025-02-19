@@ -22,21 +22,23 @@ import org.apache.doris.analysis.QueryStmt;
 import org.apache.doris.analysis.SqlParser;
 import org.apache.doris.analysis.SqlScanner;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.DeepCopy;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.common.util.Util;
+import org.apache.doris.persist.gson.GsonPostProcessable;
+import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-
+import com.google.gson.annotations.SerializedName;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.io.StringReader;
 import java.lang.ref.SoftReference;
@@ -50,7 +52,7 @@ import java.util.List;
  * Refreshing or invalidating a view will reload the view's definition but will not
  * affect the metadata of the underlying tables (if any).
  */
-public class View extends Table {
+public class View extends Table implements GsonPostProcessable {
     private static final Logger LOG = LogManager.getLogger(View.class);
 
     // The original SQL-string given as view definition. Set during analysis.
@@ -70,9 +72,11 @@ public class View extends Table {
     //
     // Corresponds to Hive's viewExpandedText, but is not identical to the SQL
     // Hive would produce in view creation.
+    @SerializedName("ivd")
     private String inlineViewDef;
 
     // for persist
+    @SerializedName("sm")
     private long sqlMode = 0L;
 
     // View definition created by parsing inlineViewDef_ into a QueryStmt.
@@ -86,7 +90,7 @@ public class View extends Table {
     private boolean isLocalView;
 
     // Set if this View is from a WITH clause with column labels.
-    private List<String> colLabels_;
+    private List<String> colLabels;
 
     // Used for read from image
     public View() {
@@ -107,7 +111,7 @@ public class View extends Table {
         super(-1, alias, TableType.VIEW, null);
         this.isLocalView = true;
         this.queryStmt = queryStmt;
-        colLabels_ = colLabels;
+        this.colLabels = colLabels;
     }
 
     public boolean isLocalView() {
@@ -144,12 +148,11 @@ public class View extends Table {
         this.sqlMode = sqlMode;
     }
 
-    public String getInlineViewDef() {
-        return inlineViewDef;
+    public long getSqlMode() {
+        return sqlMode;
     }
 
-    @Override
-    public String getDdlSql() {
+    public String getInlineViewDef() {
         return inlineViewDef;
     }
 
@@ -169,18 +172,16 @@ public class View extends Table {
         try {
             node = (ParseNode) SqlParserUtils.getFirstStmt(parser);
         } catch (Exception e) {
-            LOG.info("stmt is {}", inlineViewDef);
-            LOG.info("exception because: ", e);
-            LOG.info("msg is {}", inlineViewDef);
             // Do not pass e as the exception cause because it might reveal the existence
             // of tables that the user triggering this load may not have privileges on.
             throw new UserException(
-                    String.format("Failed to parse view-definition statement of view: %s", name));
+                    String.format("Failed to parse view-definition statement of view: %s, stmt is %s, reason is %s",
+                            name, inlineViewDef, e.getMessage()));
         }
         // Make sure the view definition parses to a query statement.
         if (!(node instanceof QueryStmt)) {
-            throw new UserException(String.format("View definition of %s " +
-                    "is not a query statement", name));
+            throw new UserException(String.format("View definition of %s "
+                    + "is not a query statement", name));
         }
         queryStmtRef = new SoftReference<QueryStmt>((QueryStmt) node);
         return (QueryStmt) node;
@@ -189,7 +190,9 @@ public class View extends Table {
     /**
      * Returns the column labels the user specified in the WITH-clause.
      */
-    public List<String> getOriginalColLabels() { return colLabels_; }
+    public List<String> getOriginalColLabels() {
+        return colLabels;
+    }
 
     /**
      * Returns the explicit column labels for this view, or null if they need to be derived
@@ -198,17 +201,19 @@ public class View extends Table {
      */
     public List<String> getColLabels() {
         QueryStmt stmt = getQueryStmt();
-        if (colLabels_ == null) return null;
-        if (colLabels_.size() >= stmt.getColLabels().size()) {
-            return colLabels_;
+        if (colLabels == null) {
+            return null;
         }
-        List<String> explicitColLabels = Lists.newArrayList(colLabels_);
-        explicitColLabels.addAll(stmt.getColLabels().subList(colLabels_.size(), stmt.getColLabels().size()));
+        if (colLabels.size() >= stmt.getColLabels().size()) {
+            return colLabels;
+        }
+        List<String> explicitColLabels = Lists.newArrayList(colLabels);
+        explicitColLabels.addAll(stmt.getColLabels().subList(colLabels.size(), stmt.getColLabels().size()));
         return explicitColLabels;
     }
 
     public boolean hasColLabels() {
-        return colLabels_ != null;
+        return colLabels != null;
     }
 
     // Get the md5 of signature string of this view.
@@ -222,16 +227,25 @@ public class View extends Table {
         sb.append(type);
         sb.append(Util.getSchemaSignatureString(fullSchema));
         sb.append(inlineViewDef);
-        sb.append(sqlMode);
+
+        // ATTN: sqlMode is missing when persist view, so we should not append it here.
+        //
+        // To keep compatible with the old version, without sqlMode, if the signature of views
+        // are the same, we think the should has the same sqlMode. (since the sqlMode doesn't
+        // effect the parsing of inlineViewDef, otherwise the parsing will fail),
+        //
+        // sb.append(sqlMode);
         String md5 = DigestUtils.md5Hex(sb.toString());
-        LOG.debug("get signature of view {}: {}. signature string: {}", name, md5, sb.toString());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("get signature of view {}: {}. signature string: {}", name, md5, sb.toString());
+        }
         return md5;
     }
 
     @Override
     public View clone() {
-        View copied = new View();
-        if (!DeepCopy.copy(this, copied, View.class, FeConstants.meta_version)) {
+        View copied = DeepCopy.copy(this, View.class, FeConstants.meta_version);
+        if (copied == null) {
             LOG.warn("failed to copy view: " + getName());
             return null;
         }
@@ -239,17 +253,32 @@ public class View extends Table {
         return copied;
     }
 
-    public void resetIdsForRestore(Catalog catalog){
-        id = catalog.getNextId();
+    public static View read(DataInput in) throws IOException {
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_136) {
+            View t = new View();
+            t.readFields(in);
+            return t;
+        }
+        return GsonUtils.GSON.fromJson(Text.readString(in), View.class);
+    }
+
+    public void resetIdsForRestore(Env env) {
+        id = env.getNextId();
+    }
+
+    public void resetViewDefForRestore(String srcDbName, String dbName) {
+        // the source db name is not setted in old BackupMeta, keep compatible with the old one.
+        if (srcDbName != null) {
+            inlineViewDef = inlineViewDef.replaceAll(srcDbName, dbName);
+        }
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        Text.writeString(out, originalViewDef);
-        Text.writeString(out, inlineViewDef);
+    public void gsonPostProcess() throws IOException {
+        originalViewDef = "";
     }
 
+    @Deprecated
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
         // just do not want to modify the meta version, so leave originalViewDef here but set it as empty

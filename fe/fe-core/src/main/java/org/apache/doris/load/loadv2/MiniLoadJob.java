@@ -18,25 +18,16 @@
 package org.apache.doris.load.loadv2;
 
 import org.apache.doris.catalog.AuthorizationInfo;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
-import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.DuplicatedRequestException;
-import org.apache.doris.common.LabelAlreadyUsedException;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.MetaNotFoundException;
-import org.apache.doris.common.QuotaExceedException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.load.EtlJobType;
-import org.apache.doris.service.FrontendOptions;
-import org.apache.doris.thrift.TMiniLoadBeginRequest;
-import org.apache.doris.transaction.BeginTransactionException;
+import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.transaction.TransactionState;
-import org.apache.doris.transaction.TransactionState.TxnCoordinator;
-import org.apache.doris.transaction.TransactionState.TxnSourceType;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-
+import com.google.gson.annotations.SerializedName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -45,31 +36,17 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Set;
 
+@Deprecated
 public class MiniLoadJob extends LoadJob {
     private static final Logger LOG = LogManager.getLogger(MiniLoadJob.class);
 
+    @SerializedName("tn")
     private String tableName;
 
     private long tableId;
 
     public MiniLoadJob() {
         super(EtlJobType.MINI);
-    }
-
-    public MiniLoadJob(long dbId, long tableId, TMiniLoadBeginRequest request) throws MetaNotFoundException {
-        super(EtlJobType.MINI, dbId, request.getLabel());
-        this.tableId = tableId;
-        this.tableName = request.getTbl();
-        if (request.isSetTimeoutSecond()) {
-            setTimeout(request.getTimeoutSecond());
-        }
-        if (request.isSetMaxFilterRatio()) {
-            setMaxFilterRatio(request.getMaxFilterRatio());
-        }
-        this.createTimestamp = request.getCreateTimestamp();
-        this.loadStartTimestamp = createTimestamp;
-        this.authorizationInfo = gatherAuthInfo();
-        this.requestId = request.getRequestId();
     }
 
     @Override
@@ -82,25 +59,30 @@ public class MiniLoadJob extends LoadJob {
         return Sets.newHashSet(tableName);
     }
 
-    public AuthorizationInfo gatherAuthInfo() throws MetaNotFoundException {
-        Database database = Catalog.getCurrentCatalog().getDbOrMetaException(dbId);
-        return new AuthorizationInfo(database.getFullName(), getTableNames());
-    }
-
     @Override
-    public void beginTxn()
-            throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException,
-            QuotaExceedException, MetaNotFoundException {
-        transactionId = Catalog.getCurrentGlobalTransactionMgr()
-                .beginTransaction(dbId, Lists.newArrayList(tableId), label, requestId,
-                                  new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
-                                  TransactionState.LoadJobSourceType.BACKEND_STREAMING, id,
-                                  getTimeout());
+    public void beginTxn() {
     }
 
     @Override
     protected void replayTxnAttachment(TransactionState txnState) {
         updateLoadingStatue(txnState);
+    }
+
+    @Override
+    public void write(DataOutput out) throws IOException {
+        String json = GsonUtils.GSON.toJson(this);
+        Text.writeString(out, json);
+    }
+
+    @Override
+    public void readFields(DataInput in) throws IOException {
+        super.readFields(in);
+        tableName = Text.readString(in);
+    }
+
+    public AuthorizationInfo gatherAuthInfo() throws MetaNotFoundException {
+        Database database = Env.getCurrentInternalCatalog().getDbOrMetaException(dbId);
+        return new AuthorizationInfo(database.getFullName(), getTableNames());
     }
 
     private void updateLoadingStatue(TransactionState txnState) {
@@ -117,17 +99,5 @@ public class MiniLoadJob extends LoadJob {
         if (miniLoadTxnCommitAttachment.getErrorLogUrl() != null) {
             loadingStatus.setTrackingUrl(miniLoadTxnCommitAttachment.getErrorLogUrl());
         }
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        Text.writeString(out, tableName);
-    }
-
-    @Override
-    public void readFields(DataInput in) throws IOException {
-        super.readFields(in);
-        tableName = Text.readString(in);
     }
 }

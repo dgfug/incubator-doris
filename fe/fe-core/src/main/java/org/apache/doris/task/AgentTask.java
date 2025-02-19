@@ -19,6 +19,7 @@ package org.apache.doris.task;
 
 import org.apache.doris.common.Config;
 import org.apache.doris.thrift.TResourceInfo;
+import org.apache.doris.thrift.TStatusCode;
 import org.apache.doris.thrift.TTaskType;
 
 public abstract class AgentTask {
@@ -36,6 +37,7 @@ public abstract class AgentTask {
 
     protected int failedTimes;
     protected String errorMsg;
+    protected TStatusCode errorCode;
     // some of process may use this member to check if the task is finished.
     // some of are not.
     // so whether the task is finished depends on caller's logic, not the value of this member.
@@ -43,7 +45,7 @@ public abstract class AgentTask {
     protected long createTime;
 
     public AgentTask(TResourceInfo resourceInfo, long backendId, TTaskType taskType,
-                     long dbId, long tableId, long partitionId, long indexId, long tabletId, long signature, long createTime) {
+            long dbId, long tableId, long partitionId, long indexId, long tabletId, long signature, long createTime) {
         this.backendId = backendId;
         this.signature = signature;
         this.taskType = taskType;
@@ -59,7 +61,7 @@ public abstract class AgentTask {
         this.failedTimes = 0;
         this.createTime = createTime;
     }
-    
+
     public AgentTask(TResourceInfo resourceInfo, long backendId, TTaskType taskType,
             long dbId, long tableId, long partitionId, long indexId, long tabletId) {
         this(resourceInfo, backendId, taskType, dbId, tableId, partitionId, indexId, tabletId, tabletId, -1);
@@ -110,6 +112,10 @@ public abstract class AgentTask {
         ++this.failedTimes;
     }
 
+    public void failedWithMsg(String errMsg) {
+        failed();
+    }
+
     public int getFailedTimes() {
         return this.failedTimes;
     }
@@ -120,6 +126,14 @@ public abstract class AgentTask {
 
     public String getErrorMsg() {
         return errorMsg;
+    }
+
+    public TStatusCode getErrorCode() {
+        return errorCode;
+    }
+
+    public void setErrorCode(TStatusCode errorCode) {
+        this.errorCode = errorCode;
     }
 
     public void setFinished(boolean isFinished) {

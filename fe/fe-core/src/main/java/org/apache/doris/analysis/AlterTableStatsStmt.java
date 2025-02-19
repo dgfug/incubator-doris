@@ -17,61 +17,114 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
-import org.apache.doris.statistics.TableStats;
+import org.apache.doris.statistics.StatsType;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 
-public class AlterTableStatsStmt extends DdlStmt {
+/**
+ * Manually inject statistics for table.
+ * <p>
+ * Syntax:
+ * ALTER TABLE table_name SET STATS ('k1' = 'v1', ...);
+ * <p>
+ * e.g.
+ * ALTER TABLE stats_test.example_tbl SET STATS ('row_count'='6001215');
+ */
+public class AlterTableStatsStmt extends DdlStmt implements NotFallbackInParser {
 
-    private static final ImmutableSet<String> CONFIGURABLE_PROPERTIES_SET = new ImmutableSet.Builder<String>()
-            .add(TableStats.DATA_SIZE)
-            .add(TableStats.ROW_COUNT)
-            .build();
+    private static final ImmutableSet<StatsType> CONFIGURABLE_PROPERTIES_SET =
+            new ImmutableSet.Builder<StatsType>()
+                    .add(StatsType.ROW_COUNT)
+                    .build();
 
-    private TableName tableName;
-    private Map<String, String> properties;
+    private final TableName tableName;
+    private final Map<String, String> properties;
+    private final Map<StatsType, String> statsTypeToValue = Maps.newHashMap();
+
+    // after analyzed
+    private long tableId;
 
     public AlterTableStatsStmt(TableName tableName, Map<String, String> properties) {
         this.tableName = tableName;
-        this.properties = properties;
-    }
-
-    @Override
-    public void analyze(Analyzer analyzer) throws UserException {
-        super.analyze(analyzer);
-        // check table name
-        tableName.analyze(analyzer);
-        // check properties
-        Optional<String> optional = properties.keySet().stream().filter(
-                entity -> !CONFIGURABLE_PROPERTIES_SET.contains(entity.toLowerCase())).findFirst();
-        if (optional.isPresent()) {
-            throw new AnalysisException(optional.get() + " is invalid statistic");
-        }
-        // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), tableName.getDb(), tableName.getTbl(),
-                PrivPredicate.ALTER)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "ALTER TABLE STATS",
-                    ConnectContext.get().getQualifiedUser(),
-                    ConnectContext.get().getRemoteIP(),
-                    tableName.getTbl());
-        }
+        this.properties = properties == null ? Collections.emptyMap() : properties;
     }
 
     public TableName getTableName() {
         return tableName;
     }
 
-    public Map<String, String> getProperties() {
-        return properties;
+    @Override
+    public void analyze(Analyzer analyzer) throws UserException {
+        if (!ConnectContext.get().getSessionVariable().enableStats) {
+            throw new UserException("Analyze function is forbidden, you should add `enable_stats=true`"
+                    + "in your FE conf file");
+        }
+
+        super.analyze(analyzer);
+        tableName.analyze(analyzer);
+
+        Optional<StatsType> optional = properties.keySet().stream().map(StatsType::fromString)
+                .filter(statsType -> !CONFIGURABLE_PROPERTIES_SET.contains(statsType))
+                .findFirst();
+        if (optional.isPresent()) {
+            throw new AnalysisException(optional.get() + " is invalid statistics");
+        }
+
+        properties.forEach((key, value) -> {
+            StatsType statsType = StatsType.fromString(key);
+            statsTypeToValue.put(statsType, value);
+        });
+
+        Database db = analyzer.getEnv().getInternalCatalog().getDbOrAnalysisException(tableName.getDb());
+        Table table = db.getTableOrAnalysisException(tableName.getTbl());
+        tableId = table.getId();
+    }
+
+    @Override
+    public void checkPriv() throws AnalysisException {
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkTblPriv(ConnectContext.get(), tableName.getCtl(), tableName.getDb(),
+                        tableName.getTbl(), PrivPredicate.ALTER)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "ALTER COLUMN STATS",
+                    ConnectContext.get().getQualifiedUser(), ConnectContext.get().getRemoteIP(),
+                    tableName.getDb() + ": " + tableName.getTbl());
+        }
+    }
+
+    public long getTableId() {
+        return tableId;
+    }
+
+    @Override
+    public String toSql() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ALTER TABLE ");
+        sb.append(tableName.toSql());
+        sb.append(" SET STATS ");
+        sb.append("(");
+        sb.append(new PrintableMap<>(properties,
+                " = ", true, false));
+        sb.append(")");
+
+        return sb.toString();
+    }
+
+    public String getValue(StatsType statsType) {
+        return statsTypeToValue.get(statsType);
     }
 }

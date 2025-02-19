@@ -19,7 +19,7 @@ package org.apache.doris.httpv2.rest;
 
 import org.apache.doris.analysis.LoadStmt;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.http.rest.RestBaseResult;
+import org.apache.doris.httpv2.entity.RestBaseResult;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.service.ExecuteEnv;
@@ -27,16 +27,13 @@ import org.apache.doris.service.ExecuteEnv;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.view.RedirectView;
 
 import java.util.List;
 import java.util.Map;
-
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -47,17 +44,19 @@ import javax.servlet.http.HttpServletResponse;
 // { "status" : "OK", "msg" : "some msg" }
 @RestController
 public class MultiAction extends RestBaseController {
-    private ExecuteEnv execEnv;
     private static final String SUB_LABEL_KEY = "sub_label";
 
     @RequestMapping(path = "/api/{" + DB_KEY + "}/_multi_desc", method = RequestMethod.POST)
     public Object multi_desc(
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response) {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
 
-            execEnv = ExecuteEnv.getInstance();
             String label = request.getParameter(LABEL_KEY);
             if (Strings.isNullOrEmpty(label)) {
                 return new RestBaseResult("No label selected");
@@ -67,14 +66,12 @@ public class MultiAction extends RestBaseController {
             checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, PrivPredicate.LOAD);
 
             // only Master has these load info
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
 
-            execEnv = ExecuteEnv.getInstance();
             final List<String> labels = Lists.newArrayList();
-            execEnv.getMultiLoadMgr().desc(fullDbName, label, labels);
+            ExecuteEnv.getInstance().getMultiLoadMgr().desc(fullDbName, label, labels);
             return new MultiLabelResult(labels);
         } catch (Exception e) {
             return new RestBaseResult(e.getMessage());
@@ -86,21 +83,23 @@ public class MultiAction extends RestBaseController {
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response)
             throws DdlException {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
-            execEnv = ExecuteEnv.getInstance();
 
             String fullDbName = getFullDbName(dbName);
             checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, PrivPredicate.LOAD);
 
             // only Master has these load info
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
 
             final List<String> labels = Lists.newArrayList();
-            execEnv.getMultiLoadMgr().list(fullDbName, labels);
+            ExecuteEnv.getInstance().getMultiLoadMgr().list(fullDbName, labels);
             return new MultiLabelResult(labels);
         } catch (Exception e) {
             return new RestBaseResult(e.getMessage());
@@ -112,9 +111,12 @@ public class MultiAction extends RestBaseController {
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response)
             throws DdlException {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
-            execEnv = ExecuteEnv.getInstance();
 
             String label = request.getParameter(LABEL_KEY);
             if (Strings.isNullOrEmpty(label)) {
@@ -125,14 +127,12 @@ public class MultiAction extends RestBaseController {
 
             // Multi start request must redirect to master, because all following sub requests will be handled
             // on Master
-
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
 
             Map<String, String> properties = Maps.newHashMap();
-            String[] keys = {LoadStmt.TIMEOUT_PROPERTY, LoadStmt.MAX_FILTER_RATIO_PROPERTY};
+            String[] keys = {LoadStmt.TIMEOUT_PROPERTY, LoadStmt.MAX_FILTER_RATIO_PROPERTY, LoadStmt.KEY_COMMENT};
             for (String key : keys) {
                 String value = request.getParameter(key);
                 if (!Strings.isNullOrEmpty(value)) {
@@ -145,7 +145,7 @@ public class MultiAction extends RestBaseController {
                     properties.put(key, value);
                 }
             }
-            execEnv.getMultiLoadMgr().startMulti(fullDbName, label, properties);
+            ExecuteEnv.getInstance().getMultiLoadMgr().startMulti(fullDbName, label, properties);
             return RestBaseResult.getOk();
         } catch (Exception e) {
             return new RestBaseResult(e.getMessage());
@@ -156,9 +156,12 @@ public class MultiAction extends RestBaseController {
     public Object multi_unload(
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response) {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
-            execEnv = ExecuteEnv.getInstance();
 
             String label = request.getParameter(LABEL_KEY);
             if (Strings.isNullOrEmpty(label)) {
@@ -173,12 +176,11 @@ public class MultiAction extends RestBaseController {
             String fullDbName = getFullDbName(dbName);
             checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, PrivPredicate.LOAD);
 
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
 
-            execEnv.getMultiLoadMgr().unload(fullDbName, label, subLabel);
+            ExecuteEnv.getInstance().getMultiLoadMgr().unload(fullDbName, label, subLabel);
             return RestBaseResult.getOk();
         } catch (Exception e) {
             return new RestBaseResult(e.getMessage());
@@ -190,9 +192,12 @@ public class MultiAction extends RestBaseController {
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response)
             throws DdlException {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
-            execEnv = ExecuteEnv.getInstance();
 
             String label = request.getParameter(LABEL_KEY);
             if (Strings.isNullOrEmpty(label)) {
@@ -203,13 +208,12 @@ public class MultiAction extends RestBaseController {
             checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, PrivPredicate.LOAD);
 
             // only Master has these load info
-
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
+
             try {
-                execEnv.getMultiLoadMgr().commit(fullDbName, label);
+                ExecuteEnv.getInstance().getMultiLoadMgr().commit(fullDbName, label);
             } catch (Exception e) {
                 return new RestBaseResult(e.getMessage());
             }
@@ -224,9 +228,12 @@ public class MultiAction extends RestBaseController {
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response)
             throws DdlException {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
+
         try {
             executeCheckPassword(request, response);
-            execEnv = ExecuteEnv.getInstance();
 
             String label = request.getParameter(LABEL_KEY);
             if (Strings.isNullOrEmpty(label)) {
@@ -237,12 +244,11 @@ public class MultiAction extends RestBaseController {
             checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), fullDbName, PrivPredicate.LOAD);
 
             // only Master has these load info
-            RedirectView redirectView = redirectToMaster(request, response);
-            if (redirectView != null) {
-                return redirectView;
+            if (checkForwardToMaster(request)) {
+                return forwardToMaster(request);
             }
 
-            execEnv.getMultiLoadMgr().abort(fullDbName, label);
+            ExecuteEnv.getInstance().getMultiLoadMgr().abort(fullDbName, label);
             return RestBaseResult.getOk();
         } catch (Exception e) {
             return new RestBaseResult(e.getMessage());
@@ -257,4 +263,3 @@ public class MultiAction extends RestBaseController {
         }
     }
 }
-

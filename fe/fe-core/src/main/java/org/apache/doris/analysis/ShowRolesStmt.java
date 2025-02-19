@@ -17,8 +17,8 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
@@ -27,17 +27,25 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
-public class ShowRolesStmt extends ShowStmt {
+public class ShowRolesStmt extends ShowStmt implements NotFallbackInParser {
     private static final ShowResultSetMetaData META_DATA;
+
     static {
         ShowResultSetMetaData.Builder builder = ShowResultSetMetaData.builder();
 
         builder.addColumn(new Column("Name", ScalarType.createVarchar(100)));
+        builder.addColumn(new Column("Comment", ScalarType.createVarchar(100)));
         builder.addColumn(new Column("Users", ScalarType.createVarchar(100)));
         builder.addColumn(new Column("GlobalPrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("CatalogPrivs", ScalarType.createVarchar(300)));
         builder.addColumn(new Column("DatabasePrivs", ScalarType.createVarchar(300)));
         builder.addColumn(new Column("TablePrivs", ScalarType.createVarchar(300)));
         builder.addColumn(new Column("ResourcePrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("CloudClusterPrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("CloudStagePrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("StorageVaultPrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("WorkloadGroupPrivs", ScalarType.createVarchar(300)));
+        builder.addColumn(new Column("ComputeGroupPrivs", ScalarType.createVarchar(300)));
 
         META_DATA = builder.build();
     }
@@ -48,7 +56,7 @@ public class ShowRolesStmt extends ShowStmt {
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "GRANT");
         }
     }

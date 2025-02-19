@@ -17,32 +17,20 @@
 
 package org.apache.doris.cluster;
 
-import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.mysql.privilege.Auth;
 
 import com.google.common.base.Strings;
 
 /**
- * used to isolate the use for the database name and user name in the catalog, 
- * all using the database name and user name place need to call the appropriate 
- * method to makeup full name or get real name, full name is made up generally 
+ * used to isolate the use for the database name and user name in the catalog,
+ * all using the database name and user name place need to call the appropriate
+ * method to makeup full name or get real name, full name is made up generally
  * in stmt's analyze.
- * 
+ *
  */
-
 public class ClusterNamespace {
 
-    public static final String CLUSTER_DELIMITER = ":";
-
-    public static String getFullName(String cluster, String name) {
-        return linkString(cluster, name);
-    }
-
-    public static String getClusterNameFromFullName(String fullName) {
-        if (!checkName(fullName)) {
-            return null;
-        }
-        return extract(fullName, 0);
-    }
+    private static final String CLUSTER_DELIMITER = ":";
 
     public static String getNameFromFullName(String fullName) {
         if (!checkName(fullName)) {
@@ -63,8 +51,8 @@ public class ClusterNamespace {
         if (Strings.isNullOrEmpty(cluster) || Strings.isNullOrEmpty(name)) {
             return null;
         }
-        if (name.contains(CLUSTER_DELIMITER) || name.equalsIgnoreCase(PaloAuth.ROOT_USER)
-                || name.equalsIgnoreCase(PaloAuth.ADMIN_USER)) {
+        if (name.contains(CLUSTER_DELIMITER) || name.equalsIgnoreCase(Auth.ROOT_USER)
+                || name.equalsIgnoreCase(Auth.ADMIN_USER)) {
             return name;
         }
         final StringBuilder sb = new StringBuilder(cluster);

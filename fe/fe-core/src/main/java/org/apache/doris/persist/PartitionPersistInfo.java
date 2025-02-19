@@ -17,41 +17,55 @@
 
 package org.apache.doris.persist;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.DataProperty;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ListPartitionItem;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.ReplicaAllocation;
 import org.apache.doris.common.FeMetaVersion;
+import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.RangeUtils;
+import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.collect.Range;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
 public class PartitionPersistInfo implements Writable {
+    @SerializedName(value = "dbId")
     private Long dbId;
+    @SerializedName(value = "tableId")
     private Long tableId;
+    @SerializedName(value = "partition")
     private Partition partition;
 
+    @SerializedName(value = "range")
     private Range<PartitionKey> range;
+    @SerializedName(value = "listPartitionItem")
     private PartitionItem listPartitionItem;
+    @SerializedName(value = "dataProperty")
     private DataProperty dataProperty;
+    @SerializedName(value = "replicaAlloc")
     private ReplicaAllocation replicaAlloc;
+    @SerializedName(value = "isInMemory")
     private boolean isInMemory = false;
+    @SerializedName(value = "isTempPartition")
     private boolean isTempPartition = false;
-    
+    @SerializedName(value = "isMutable")
+    private boolean isMutable = true;
+
     public PartitionPersistInfo() {
     }
 
     public PartitionPersistInfo(long dbId, long tableId, Partition partition, Range<PartitionKey> range,
-                                PartitionItem listPartitionItem, DataProperty dataProperty, ReplicaAllocation replicaAlloc,
-                                boolean isInMemory, boolean isTempPartition) {
+            PartitionItem listPartitionItem, DataProperty dataProperty, ReplicaAllocation replicaAlloc,
+            boolean isInMemory, boolean isTempPartition, boolean isMutable) {
         this.dbId = dbId;
         this.tableId = tableId;
         this.partition = partition;
@@ -63,12 +77,13 @@ public class PartitionPersistInfo implements Writable {
         this.replicaAlloc = replicaAlloc;
         this.isInMemory = isInMemory;
         this.isTempPartition = isTempPartition;
+        this.isMutable = isMutable;
     }
-    
+
     public Long getDbId() {
         return dbId;
     }
-    
+
     public Long getTableId() {
         return tableId;
     }
@@ -97,51 +112,59 @@ public class PartitionPersistInfo implements Writable {
         return isInMemory;
     }
 
+    public boolean isMutable() {
+        return isMutable;
+    }
+
     public boolean isTempPartition() {
         return isTempPartition;
     }
 
     public void write(DataOutput out) throws IOException {
-        out.writeLong(dbId);
-        out.writeLong(tableId);
-        partition.write(out);
-
-        RangeUtils.writeRange(out, range);
-        listPartitionItem.write(out);
-        dataProperty.write(out);
-        replicaAlloc.write(out);
-        out.writeBoolean(isInMemory);
-        out.writeBoolean(isTempPartition);
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
+    public static PartitionPersistInfo read(DataInput in) throws IOException {
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_136) {
+            return GsonUtils.GSON.fromJson(Text.readString(in), PartitionPersistInfo.class);
+        } else {
+            PartitionPersistInfo info = new PartitionPersistInfo();
+            info.readFields(in);
+            return info;
+        }
+    }
+
+    @Deprecated
     public void readFields(DataInput in) throws IOException {
         dbId = in.readLong();
         tableId = in.readLong();
         partition = Partition.read(in);
 
         range = RangeUtils.readRange(in);
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_98) {
-            listPartitionItem = ListPartitionItem.read(in);
-        } else {
-            listPartitionItem = ListPartitionItem.DUMMY_ITEM;
-        }
-
+        listPartitionItem = ListPartitionItem.read(in);
         dataProperty = DataProperty.read(in);
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_105) {
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_105) {
             this.replicaAlloc = new ReplicaAllocation(in.readShort());
         } else {
             this.replicaAlloc = ReplicaAllocation.read(in);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_72) {
-            isInMemory = in.readBoolean();
-        }
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_74) {
-            isTempPartition = in.readBoolean();
+        isInMemory = in.readBoolean();
+        isTempPartition = in.readBoolean();
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_115) {
+            isMutable = in.readBoolean();
         }
     }
-    
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
+    }
+
+    @Override
+    public String toString() {
+        return toJson();
+    }
+
     public boolean equals(Object obj) {
         if (this == obj) {
             return true;
@@ -149,9 +172,9 @@ public class PartitionPersistInfo implements Writable {
         if (!(obj instanceof PartitionPersistInfo)) {
             return false;
         }
-        
+
         PartitionPersistInfo info = (PartitionPersistInfo) obj;
-        
+
         return dbId.equals(info.dbId)
                    && tableId.equals(info.tableId)
                    && partition.equals(info.partition);

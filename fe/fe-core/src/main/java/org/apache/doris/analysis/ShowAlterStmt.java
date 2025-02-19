@@ -17,11 +17,10 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.DatabaseIf;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -36,7 +35,6 @@ import org.apache.doris.qe.ShowResultSetMetaData;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -47,13 +45,14 @@ import java.util.List;
 /*
  * ShowAlterStmt: used to show process state of alter statement.
  * Syntax:
- *      SHOW ALTER TABLE [COLUMN | ROLLUP] [FROM dbName] [WHERE TableName="xxx"] [ORDER BY CreateTime DESC] [LIMIT [offset,]rows]
+ *      SHOW ALTER TABLE [COLUMN | ROLLUP] [FROM dbName] [WHERE TableName="xxx"]
+ *      [ORDER BY CreateTime DESC] [LIMIT [offset,]rows]
  */
-public class ShowAlterStmt extends ShowStmt {
+public class ShowAlterStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowAlterStmt.class);
 
     public static enum AlterType {
-        COLUMN, ROLLUP
+        COLUMN, ROLLUP, INDEX
     }
 
     private AlterType type;
@@ -66,11 +65,25 @@ public class ShowAlterStmt extends ShowStmt {
 
     private ProcNodeInterface node;
 
-    public AlterType getType() { return type; }
-    public String getDbName() { return dbName; }
-    public HashMap<String, Expr> getFilterMap() { return filterMap; }
-    public LimitElement getLimitElement(){ return limitElement; }
-    public ArrayList<OrderByPair> getOrderPairs(){ return orderByPairs; }
+    public AlterType getType() {
+        return type;
+    }
+
+    public String getDbName() {
+        return dbName;
+    }
+
+    public HashMap<String, Expr> getFilterMap() {
+        return filterMap;
+    }
+
+    public LimitElement getLimitElement() {
+        return limitElement;
+    }
+
+    public ArrayList<OrderByPair> getOrderPairs() {
+        return orderByPairs;
+    }
 
     public ProcNodeInterface getNode() {
         return this.node;
@@ -88,16 +101,17 @@ public class ShowAlterStmt extends ShowStmt {
 
     private void getPredicateValue(Expr subExpr) throws AnalysisException {
         if (!(subExpr instanceof BinaryPredicate)) {
-            throw new AnalysisException("The operator =|>=|<=|>|<|!= are supported."); 
+            throw new AnalysisException("The operator =|>=|<=|>|<|!= are supported.");
         }
+
         BinaryPredicate binaryPredicate = (BinaryPredicate) subExpr;
         if (!(subExpr.getChild(0) instanceof SlotRef)) {
-            throw new AnalysisException("Only support column = xxx syntax."); 
+            throw new AnalysisException("Only support column = xxx syntax.");
         }
         String leftKey = ((SlotRef) subExpr.getChild(0)).getColumnName().toLowerCase();
-        if (leftKey.equals("tablename") || leftKey.equals("state")) {
-            if (!(subExpr.getChild(1) instanceof StringLiteral) ||
-                    binaryPredicate.getOp() != BinaryPredicate.Operator.EQ) {
+        if (leftKey.equals("tablename") || leftKey.equals("state") || leftKey.equals("indexname")) {
+            if (!(subExpr.getChild(1) instanceof StringLiteral)
+                    || binaryPredicate.getOp() != BinaryPredicate.Operator.EQ) {
                 throw new AnalysisException("Where clause : TableName = \"table1\" or "
                     + "State = \"FINISHED|CANCELLED|RUNNING|PENDING|WAITING_TXN\"");
             }
@@ -106,9 +120,11 @@ public class ShowAlterStmt extends ShowStmt {
                 throw new AnalysisException("Where clause : CreateTime/FinishTime =|>=|<=|>|<|!= "
                     + "\"2019-12-02|2019-12-02 14:54:00\"");
             }
-            subExpr.setChild(1,((StringLiteral) subExpr.getChild(1)).castTo(Type.DATETIME));
+            subExpr.setChild(1, (subExpr.getChild(1)).castTo(
+                    ScalarType.getDefaultDateType(Type.DATETIME)));
         } else {
-            throw new AnalysisException("The columns of TableName/CreateTime/FinishTime/State are supported.");
+            throw new AnalysisException(
+                    "The columns of TableName/IndexName/CreateTime/FinishTime/State are supported.");
         }
         filterMap.put(leftKey, subExpr);
     }
@@ -131,13 +147,13 @@ public class ShowAlterStmt extends ShowStmt {
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
-        //first analyze 
-        analyzeSyntax(analyzer);        
+        //first analyze
+        analyzeSyntax(analyzer);
 
         // check auth when get job info
         handleShowAlterTable(analyzer);
     }
-    
+
     public void analyzeSyntax(Analyzer analyzer) throws AnalysisException, UserException {
         super.analyze(analyzer);
         if (Strings.isNullOrEmpty(dbName)) {
@@ -145,8 +161,6 @@ public class ShowAlterStmt extends ShowStmt {
             if (Strings.isNullOrEmpty(dbName)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
 
         Preconditions.checkNotNull(type);
@@ -174,10 +188,9 @@ public class ShowAlterStmt extends ShowStmt {
             limitElement.analyze(analyzer);
         }
     }
-    
-    
+
     public void handleShowAlterTable(Analyzer analyzer) throws UserException {
-        Database db = analyzer.getCatalog().getDbOrAnalysisException(dbName);
+        DatabaseIf db = analyzer.getEnv().getInternalCatalog().getDbOrAnalysisException(dbName);
 
         // build proc path
         StringBuilder sb = new StringBuilder();
@@ -191,7 +204,9 @@ public class ShowAlterStmt extends ShowStmt {
             throw new UserException("SHOW " + type.name() + " does not implement yet");
         }
 
-        LOG.debug("process SHOW PROC '{}';", sb.toString());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("process SHOW PROC '{}';", sb.toString());
+        }
         // create show proc stmt
         // '/jobs/db_name/rollup|schema_change/
         node = ProcService.getInstance().open(sb.toString());

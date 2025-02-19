@@ -17,8 +17,8 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
@@ -30,7 +30,7 @@ import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.base.Strings;
 
-public class ShowIndexStmt extends ShowStmt {
+public class ShowIndexStmt extends ShowStmt implements NotFallbackInParser {
     private static final ShowResultSetMetaData META_DATA =
             ShowResultSetMetaData.builder()
                     .addColumn(new Column("Table", ScalarType.createVarchar(64)))
@@ -45,6 +45,7 @@ public class ShowIndexStmt extends ShowStmt {
                     .addColumn(new Column("Null", ScalarType.createVarchar(80)))
                     .addColumn(new Column("Index_type", ScalarType.createVarchar(80)))
                     .addColumn(new Column("Comment", ScalarType.createVarchar(80)))
+                    .addColumn(new Column("Properties", ScalarType.createVarchar(200)))
                     .build();
     private String dbName;
     private TableName tableName;
@@ -57,7 +58,7 @@ public class ShowIndexStmt extends ShowStmt {
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
         super.analyze(analyzer);
-        
+
         if (!Strings.isNullOrEmpty(dbName)) {
             // if user specify the `from db`, overwrite the db in tableName with this db.
             // for example:
@@ -68,11 +69,11 @@ public class ShowIndexStmt extends ShowStmt {
             tableName.setDb(dbName);
         }
         tableName.analyze(analyzer);
-
-        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), tableName.getDb(), tableName.getTbl(),
-                PrivPredicate.SHOW)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, analyzer.getQualifiedUser(),
-                    tableName.toString());
+        if (!Env.getCurrentEnv().getAccessManager().checkTblPriv(
+                ConnectContext.get(), tableName.getCtl(), tableName.getDb(), tableName.getTbl(), PrivPredicate.SHOW)) {
+            ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "SHOW INDEX",
+                    analyzer.getQualifiedUser(), ConnectContext.get().getRemoteIP(),
+                    tableName.toSql());
         }
     }
 

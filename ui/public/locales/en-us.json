@@ -49,5 +49,7 @@
     "selectWarning": "Please select a table",
     "executionTime": "Execution Time",
     "search":"Search",
-    "executionFailed":"Execution failed"
+    "executionFailed":"Execution failed",
+    "loading":"loading",
+    "Download": "Download"
 }

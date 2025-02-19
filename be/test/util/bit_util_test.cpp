@@ -17,16 +17,12 @@
 
 #include "util/bit_util.h"
 
-#include <gtest/gtest.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <gtest/gtest-message.h>
+#include <gtest/gtest-test-part.h>
 
-#include <boost/utility.hpp>
-#include <iostream>
+#include <boost/utility/binary.hpp>
 
-#include "common/config.h"
-#include "util/cpu_info.h"
-#include "util/logging.h"
+#include "gtest/gtest_pred_impl.h"
 
 namespace doris {
 
@@ -51,16 +47,22 @@ TEST(BitUtil, Popcount) {
     EXPECT_EQ(BitUtil::popcount_no_hw(0), 0);
 }
 
-} // namespace doris
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
+TEST(BitUtil, BigEndianToHost) {
+    uint16_t v16 = 0x1234;
+    uint32_t v32 = 0x12345678;
+    uint64_t v64 = 0x123456789abcdef0;
+    unsigned __int128 v128 = ((__int128)0x123456789abcdef0LL << 64) | 0x123456789abcdef0LL;
+    wide::UInt256 v256 =
+            wide::UInt256(0x123456789abcdef0) << 192 | wide::UInt256(0x123456789abcdef0) << 128 |
+            wide::UInt256(0x123456789abcdef0) << 64 | wide::UInt256(0x123456789abcdef0);
+    EXPECT_EQ(BitUtil::big_endian_to_host(v16), 0x3412);
+    EXPECT_EQ(BitUtil::big_endian_to_host(v32), 0x78563412);
+    EXPECT_EQ(BitUtil::big_endian_to_host(v64), 0xf0debc9a78563412);
+    EXPECT_EQ(BitUtil::big_endian_to_host(v128),
+              ((__int128)0xf0debc9a78563412LL << 64) | 0xf0debc9a78563412LL);
+    EXPECT_EQ(BitUtil::big_endian_to_host(v256),
+              wide::UInt256(0xf0debc9a78563412) << 192 | wide::UInt256(0xf0debc9a78563412) << 128 |
+                      wide::UInt256(0xf0debc9a78563412) << 64 | wide::UInt256(0xf0debc9a78563412));
 }
+
+} // namespace doris

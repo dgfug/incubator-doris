@@ -17,8 +17,8 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
@@ -33,19 +33,20 @@ import com.google.common.base.Preconditions;
 /*
  *  SHOW ALL GRANTS;
  *      show all grants.
- *      
+ *
  *  SHOW GRANTS:
  *      show grants of current user
- *      
+ *
  *  SHOW GRANTS FOR user@'xxx';
  *      show grants for specified user identity
  */
 //
 // SHOW GRANTS;
 // SHOW GRANTS FOR user@'xxx'
-public class ShowGrantsStmt extends ShowStmt {
+public class ShowGrantsStmt extends ShowStmt implements NotFallbackInParser {
 
     private static final ShowResultSetMetaData META_DATA;
+
     static {
         ShowResultSetMetaData.Builder builder = ShowResultSetMetaData.builder();
         for (String col : AuthProcDir.TITLE_NAMES) {
@@ -72,7 +73,7 @@ public class ShowGrantsStmt extends ShowStmt {
             if (isAll) {
                 throw new AnalysisException("Can not specified keyword ALL when specified user");
             }
-            userIdent.analyze(analyzer.getClusterName());
+            userIdent.analyze();
         } else {
             if (!isAll) {
                 // self
@@ -84,9 +85,12 @@ public class ShowGrantsStmt extends ShowStmt {
 
         // if show all grants, or show other user's grants, need global GRANT priv.
         if (isAll || !self.equals(userIdent)) {
-            if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
+            if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "GRANT");
             }
+        }
+        if (userIdent != null && !Env.getCurrentEnv().getAccessManager().getAuth().doesUserExist(userIdent)) {
+            throw new AnalysisException(String.format("User: %s does not exist", userIdent));
         }
     }
 

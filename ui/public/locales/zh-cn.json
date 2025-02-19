@@ -49,5 +49,7 @@
     "selectWarning": "请选择表",
     "executionTime": "执行时间",
     "search":"查询",
-    "executionFailed": "执行失败"
+    "executionFailed": "执行失败",
+    "loading":"加载中",
+    "Download": "下载"
 }

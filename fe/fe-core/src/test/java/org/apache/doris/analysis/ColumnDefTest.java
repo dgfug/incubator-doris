@@ -19,10 +19,16 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.ColumnDef.DefaultValue;
 import org.apache.doris.catalog.AggregateType;
+import org.apache.doris.catalog.ArrayType;
+import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
+import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.qe.ConnectContext;
 
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -32,6 +38,8 @@ public class ColumnDefTest {
     private TypeDef stringCol;
     private TypeDef floatCol;
     private TypeDef booleanCol;
+    private TypeDef bitmapCol;
+    private ConnectContext ctx;
 
     @Before
     public void setUp() {
@@ -39,7 +47,15 @@ public class ColumnDefTest {
         stringCol = new TypeDef(ScalarType.createChar(10));
         floatCol = new TypeDef(ScalarType.createType(PrimitiveType.FLOAT));
         booleanCol = new TypeDef(ScalarType.createType(PrimitiveType.BOOLEAN));
+        bitmapCol = new TypeDef(ScalarType.createType(PrimitiveType.BITMAP));
 
+        ctx = new ConnectContext();
+        new MockUp<ConnectContext>() {
+            @Mock
+            public ConnectContext get() {
+                return ctx;
+            }
+        };
     }
 
     @Test
@@ -47,7 +63,7 @@ public class ColumnDefTest {
         ColumnDef column = new ColumnDef("col", intCol);
         column.analyze(true);
 
-        Assert.assertEquals("`col` int(11) NOT NULL COMMENT \"\"", column.toString());
+        Assert.assertEquals("`col` int NOT NULL COMMENT \"\"", column.toString());
         Assert.assertEquals("col", column.getName());
         Assert.assertEquals(PrimitiveType.INT, column.getType().getPrimitiveType());
         Assert.assertNull(column.getAggregateType());
@@ -58,7 +74,7 @@ public class ColumnDefTest {
         column.analyze(true);
         Assert.assertNull(column.getAggregateType());
         Assert.assertEquals("10", column.getDefaultValue());
-        Assert.assertEquals("`col` int(11) NOT NULL DEFAULT \"10\" COMMENT \"\"", column.toSql());
+        Assert.assertEquals("`col` int NOT NULL DEFAULT \"10\" COMMENT \"\"", column.toSql());
 
         // agg
         column = new ColumnDef("col", floatCol, false, AggregateType.SUM, false, new DefaultValue(true, "10"), "");
@@ -66,24 +82,36 @@ public class ColumnDefTest {
         Assert.assertEquals("10", column.getDefaultValue());
         Assert.assertEquals(AggregateType.SUM, column.getAggregateType());
         Assert.assertEquals("`col` float SUM NOT NULL DEFAULT \"10\" COMMENT \"\"", column.toSql());
+
+        // agg none
+        column = new ColumnDef("col", bitmapCol, false, AggregateType.NONE, false, DefaultValue.BITMAP_EMPTY_DEFAULT_VALUE, "");
+
+        Assert.assertEquals(AggregateType.NONE, column.getAggregateType());
+        Assert.assertEquals("`col` bitmap NOT NULL DEFAULT BITMAP_EMPTY COMMENT \"\"", column.toSql());
     }
 
     @Test
     public void testReplaceIfNotNull() throws AnalysisException {
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             // not allow null
-            ColumnDef column = new ColumnDef("col", intCol, false, AggregateType.REPLACE_IF_NOT_NULL, false, DefaultValue.NOT_SET, "");
+            ColumnDef column = new ColumnDef("col", intCol, false, AggregateType.REPLACE_IF_NOT_NULL, true, DefaultValue.NOT_SET, "");
             column.analyze(true);
             Assert.assertEquals(AggregateType.REPLACE_IF_NOT_NULL, column.getAggregateType());
-            Assert.assertEquals("`col` int(11) REPLACE_IF_NOT_NULL NULL DEFAULT \"null\" COMMENT \"\"", column.toSql());
-        }
-        {
+            Assert.assertEquals("`col` int REPLACE_IF_NOT_NULL NULL DEFAULT NULL COMMENT \"\"", column.toSql());
+        } // CHECKSTYLE IGNORE THIS LINE
+        { // CHECKSTYLE IGNORE THIS LINE
             // not allow null
-            ColumnDef column = new ColumnDef("col", intCol, false, AggregateType.REPLACE_IF_NOT_NULL, false, new DefaultValue(true, "10"), "");
+            ColumnDef column = new ColumnDef("col", intCol, false, AggregateType.REPLACE_IF_NOT_NULL, true, new DefaultValue(true, "10"), "");
             column.analyze(true);
             Assert.assertEquals(AggregateType.REPLACE_IF_NOT_NULL, column.getAggregateType());
-            Assert.assertEquals("`col` int(11) REPLACE_IF_NOT_NULL NULL DEFAULT \"10\" COMMENT \"\"", column.toSql());
-        }
+            Assert.assertEquals("`col` int REPLACE_IF_NOT_NULL NULL DEFAULT \"10\" COMMENT \"\"", column.toSql());
+        } // CHECKSTYLE IGNORE THIS LINE
+        { // CHECKSTYLE IGNORE THIS LINE
+            ColumnDef column = new ColumnDef("col", intCol, false, AggregateType.REPLACE_IF_NOT_NULL, true, DefaultValue.NULL_DEFAULT_VALUE, "");
+            column.analyze(true);
+            Assert.assertEquals(AggregateType.REPLACE_IF_NOT_NULL, column.getAggregateType());
+            Assert.assertEquals("`col` int REPLACE_IF_NOT_NULL NULL DEFAULT NULL COMMENT \"\"", column.toSql());
+        } // CHECKSTYLE IGNORE THIS LINE
     }
 
     @Test(expected = AnalysisException.class)
@@ -100,7 +128,7 @@ public class ColumnDefTest {
     }
 
     @Test
-    public void testBooleanDefaultValue() throws AnalysisException{
+    public void testBooleanDefaultValue() throws AnalysisException {
         ColumnDef column1 = new ColumnDef("col", booleanCol, true, null, true, new DefaultValue(true, "1"), "");
         column1.analyze(true);
         Assert.assertEquals("1", column1.getDefaultValue());
@@ -117,5 +145,15 @@ public class ColumnDefTest {
         }
     }
 
-
+    @Test
+    public void testArray() throws AnalysisException {
+        TypeDef typeDef = new TypeDef(new ArrayType(Type.INT));
+        ColumnDef columnDef = new ColumnDef("array", typeDef, false, null, true, DefaultValue.NOT_SET, "");
+        Column column = columnDef.toColumn();
+        Assert.assertEquals(1, column.getChildren().size());
+        Column childColumn = column.getChildren().get(0);
+        Assert.assertEquals("item", childColumn.getName());
+        Assert.assertEquals(Type.INT, childColumn.getType());
+        Assert.assertTrue(childColumn.isAllowNull());
+    }
 }

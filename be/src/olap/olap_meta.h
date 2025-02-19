@@ -15,49 +15,69 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_OLAP_OLAP_META_H
-#define DORIS_BE_SRC_OLAP_OLAP_OLAP_META_H
+#pragma once
+
+#include <rocksdb/iterator.h>
 
 #include <functional>
-#include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
-#include "olap/olap_define.h"
-#include "rocksdb/db.h"
+#include "common/status.h"
+
+namespace rocksdb {
+class ColumnFamilyHandle;
+class DB;
+class WriteBatch;
+} // namespace rocksdb
 
 namespace doris {
 
-class OlapMeta {
+class OlapMeta final {
 public:
+    struct BatchEntry {
+        const std::string& key;
+        const std::string& value;
+
+        BatchEntry(const std::string& key_arg, const std::string& value_arg)
+                : key(key_arg), value(value_arg) {}
+    };
+
     OlapMeta(const std::string& root_path);
+    ~OlapMeta();
 
-    virtual ~OlapMeta();
+    Status init();
 
-    OLAPStatus init();
-
-    OLAPStatus get(const int column_family_index, const std::string& key, std::string* value);
+    Status get(const int column_family_index, const std::string& key, std::string* value);
 
     bool key_may_exist(const int column_family_index, const std::string& key, std::string* value);
 
-    OLAPStatus put(const int column_family_index, const std::string& key, const std::string& value);
+    Status put(const int column_family_index, const std::string& key, const std::string& value);
+    Status put(const int column_family_index, const std::vector<BatchEntry>& entries);
+    Status put(rocksdb::WriteBatch* batch);
 
-    OLAPStatus remove(const int column_family_index, const std::string& key);
+    Status remove(const int column_family_index, const std::string& key);
+    Status remove(const int column_family_index, const std::vector<std::string>& keys);
 
-    OLAPStatus iterate(const int column_family_index, const std::string& prefix,
-                       std::function<bool(const std::string&, const std::string&)> const& func);
+    Status iterate(const int column_family_index, std::string_view prefix,
+                   std::function<bool(std::string_view, std::string_view)> const& func);
 
-    std::string get_root_path();
+    Status iterate(const int column_family_index, std::string_view seek_key,
+                   std::string_view prefix,
+                   std::function<bool(std::string_view, std::string_view)> const& func);
 
-    OLAPStatus get_tablet_convert_finished(bool& flag);
+    [[nodiscard]] std::string get_root_path() const { return _root_path; }
 
-    OLAPStatus set_tablet_convert_finished();
+    rocksdb::ColumnFamilyHandle* get_handle(const int column_family_index) {
+        return _handles[column_family_index].get();
+    }
 
 private:
     std::string _root_path;
-    rocksdb::DB* _db;
-    std::vector<rocksdb::ColumnFamilyHandle*> _handles;
+    // keep order of _db && _handles, we need destroy _handles before _db
+    std::unique_ptr<rocksdb::DB, std::function<void(rocksdb::DB*)>> _db;
+    std::vector<std::unique_ptr<rocksdb::ColumnFamilyHandle>> _handles;
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_OLAP_OLAP_META_H

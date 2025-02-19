@@ -17,8 +17,10 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.cloud.system.CloudSystemInfoService;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.mysql.privilege.PrivPredicate;
@@ -39,6 +41,7 @@ public class SetUserPropertyVar extends SetVar {
     public SetUserPropertyVar(String key, String value) {
         this.key = key;
         this.value = value;
+        this.varType = SetVarType.SET_USER_PROPERTY_VAR;
     }
 
     public String getPropertyKey() {
@@ -65,9 +68,9 @@ public class SetUserPropertyVar extends SetVar {
         for (Pattern advPattern : UserProperty.ADVANCED_PROPERTIES) {
             Matcher matcher = advPattern.matcher(key);
             if (matcher.find()) {
-                if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
-                    ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR,
-                                                        "ADMIN");
+                if (!Env.getCurrentEnv().getAccessManager()
+                        .checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+                    ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
                 }
                 return;
             }
@@ -76,10 +79,26 @@ public class SetUserPropertyVar extends SetVar {
         for (Pattern commPattern : UserProperty.COMMON_PROPERTIES) {
             Matcher matcher = commPattern.matcher(key);
             if (matcher.find()) {
-                if (!isSelf && !Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(),
-                                                                                      PrivPredicate.ADMIN)) {
+                if (!isSelf && !Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(),
+                        PrivPredicate.ADMIN)) {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR,
-                                                        "GRANT");
+                            "GRANT");
+                }
+                if (Config.isCloudMode()) {
+                    // check value, clusterName is valid.
+                    if (key.equals(UserProperty.DEFAULT_CLOUD_CLUSTER)
+                            && !Strings.isNullOrEmpty(value)
+                            && !((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                                    .getCloudClusterNames().contains(value)) {
+                        ErrorReport.reportAnalysisException(ErrorCode.ERR_CLOUD_CLUSTER_ERROR, value);
+                    }
+
+                    if (key.equals(UserProperty.DEFAULT_COMPUTE_GROUP)
+                            && !Strings.isNullOrEmpty(value)
+                            && !((CloudSystemInfoService) Env.getCurrentSystemInfo())
+                                    .getCloudClusterNames().contains(value)) {
+                        ErrorReport.reportAnalysisException(ErrorCode.ERR_CLOUD_CLUSTER_ERROR, value);
+                    }
                 }
                 return;
             }

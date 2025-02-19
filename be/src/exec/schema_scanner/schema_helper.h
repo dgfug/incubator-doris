@@ -17,10 +17,28 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <string>
+
 #include "common/status.h"
-#include "gen_cpp/FrontendService_types.h"
 
 namespace doris {
+class TDescribeTablesParams;
+class TDescribeTablesResult;
+class TGetDbsParams;
+class TGetDbsResult;
+class TGetTablesParams;
+class TGetTablesResult;
+class TListPrivilegesResult;
+class TListTableStatusResult;
+class TListTableMetadataNameIdsResult;
+class TShowVariableRequest;
+class TShowVariableResult;
+class TShowProcessListRequest;
+class TShowProcessListResult;
+class TShowUserRequest;
+class TShowUserResult;
 
 // this class is a helper for getting schema info from FE
 class SchemaHelper {
@@ -35,10 +53,13 @@ public:
     static Status list_table_status(const std::string& ip, const int32_t port,
                                     const TGetTablesParams& table_params,
                                     TListTableStatusResult* table_result);
+    static Status list_table_metadata_name_ids(const std::string& ip, const int32_t port,
+                                               const doris::TGetTablesParams& request,
+                                               TListTableMetadataNameIdsResult* result);
 
-    static Status describe_table(const std::string& ip, const int32_t port,
-                                 const TDescribeTableParams& desc_params,
-                                 TDescribeTableResult* desc_result);
+    static Status describe_tables(const std::string& ip, const int32_t port,
+                                  const TDescribeTablesParams& desc_params,
+                                  TDescribeTablesResult* desc_result);
 
     static Status show_variables(const std::string& ip, const int32_t port,
                                  const TShowVariableRequest& var_params,
@@ -57,6 +78,12 @@ public:
                                              TListPrivilegesResult* privileges_result);
 
     static std::string extract_db_name(const std::string& full_name);
+
+    static Status show_process_list(const std::string& ip, const int32_t port,
+                                    const TShowProcessListRequest& request,
+                                    TShowProcessListResult* result);
+    static Status show_user(const std::string& ip, const int32_t port,
+                            const TShowUserRequest& request, TShowUserResult* result);
 };
 
 } // namespace doris

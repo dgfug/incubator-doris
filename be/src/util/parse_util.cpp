@@ -14,15 +14,18 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/parse-util.cc
+// and modified by Doris
 
 #include "util/parse_util.h"
 
-#include "util/mem_info.h"
 #include "util/string_parser.hpp"
 
 namespace doris {
 
-int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, int64_t parent_limit, bool* is_percent) {
+int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, int64_t parent_limit,
+                                  int64_t physical_mem, bool* is_percent) {
     if (mem_spec_str.empty()) {
         return 0;
     }
@@ -79,12 +82,12 @@ int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, int64_t paren
         }
 
         if (multiplier != -1) {
-            bytes = multiplier * limit_val;
+            bytes = int64_t(multiplier * limit_val);
         } else if (*is_percent) {
             if (parent_limit == -1) {
-                bytes = (static_cast<double>(limit_val) / 100.0) * MemInfo::physical_mem();
+                bytes = int64_t(static_cast<double>(limit_val) / 100.0 * physical_mem);
             } else {
-                bytes = (static_cast<double>(limit_val) / 100.0) * parent_limit;
+                bytes = int64_t(static_cast<double>(limit_val) / 100.0 * parent_limit);
             }
         }
     } else {
@@ -95,6 +98,13 @@ int64_t ParseUtil::parse_mem_spec(const std::string& mem_spec_str, int64_t paren
         if (result != StringParser::PARSE_SUCCESS) {
             return -1;
         }
+
+        auto limit_val_double =
+                StringParser::string_to_float<double>(mem_spec_str.data(), number_str_len, &result);
+        if (result == StringParser::PARSE_SUCCESS && limit_val_double != limit_val) {
+            return -1; // mem_spec_str is double.
+        }
+
         bytes = limit_val;
     }
 

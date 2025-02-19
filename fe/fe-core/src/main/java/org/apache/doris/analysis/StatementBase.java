@@ -14,25 +14,29 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/StatementBase.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.ErrorCode;
-import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.thrift.TQueryOptions;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 public abstract class StatementBase implements ParseNode {
-
+    private static final Logger LOG = LogManager.getLogger(StatementBase.class);
     private String clusterName;
 
     // Set this variable if this QueryStmt is the top level query from an EXPLAIN <query>
@@ -51,6 +55,11 @@ public abstract class StatementBase implements ParseNode {
 
     private UserIdentity userInfo;
 
+    private boolean isPrepared = false;
+    // select * from tbl where a = ? and b = ?
+    // `?` is the placeholder
+    private ArrayList<PlaceHolderExpr> placeholders = new ArrayList<>();
+
     protected StatementBase() { }
 
     /**
@@ -67,14 +76,20 @@ public abstract class StatementBase implements ParseNode {
      * were missing from the catalog.
      * It is up to the analysis() implementation to ensure the maximum number of missing
      * tables/views get collected in the Analyzer before failing analyze().
+     * Should call the method firstly when override the method, the analyzer param should be
+     * the one which statement would use.
      */
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
-        if (isAnalyzed()) return;
-        this.analyzer = analyzer;
-        if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NO_SELECT_CLUSTER);
+        if (isAnalyzed()) {
+            return;
         }
-        this.clusterName = analyzer.getClusterName();
+        this.analyzer = analyzer;
+        if (analyzer.getRootStatementClazz() == null) {
+            analyzer.setRootStatementClazz(this.getClass());
+        }
+    }
+
+    public void checkPriv() throws AnalysisException {
     }
 
     public Analyzer getAnalyzer() {
@@ -89,8 +104,17 @@ public abstract class StatementBase implements ParseNode {
         this.explainOptions = options;
     }
 
+    public void setPlaceHolders(ArrayList<PlaceHolderExpr> placeholders) {
+        LOG.debug("setPlaceHolders {}", placeholders);
+        this.placeholders = new ArrayList<PlaceHolderExpr>(placeholders);
+    }
+
     public boolean isExplain() {
         return this.explainOptions != null;
+    }
+
+    public ArrayList<PlaceHolderExpr> getPlaceHolders() {
+        return this.placeholders;
     }
 
     public boolean isVerbose() {
@@ -99,6 +123,14 @@ public abstract class StatementBase implements ParseNode {
 
     public ExplainOptions getExplainOptions() {
         return explainOptions;
+    }
+
+    public void setIsPrepared() {
+        this.isPrepared = true;
+    }
+
+    public boolean isPrepared() {
+        return this.isPrepared;
     }
 
     /*
@@ -111,6 +143,10 @@ public abstract class StatementBase implements ParseNode {
         return "";
     }
 
+    public StmtType stmtType() {
+        return StmtType.OTHER;
+    }
+
     public abstract RedirectStatus getRedirectStatus();
 
     /**
@@ -118,7 +154,9 @@ public abstract class StatementBase implements ParseNode {
      * if not applicable (not all statements produce an output result set).
      * Subclasses must override this as necessary.
      */
-    public List<String> getColLabels() { return Collections.<String>emptyList();  }
+    public List<String> getColLabels() {
+        return Collections.<String>emptyList();
+    }
 
     /**
      * Sets the column labels of this statement, if applicable. No-op of the statement does
@@ -126,7 +164,9 @@ public abstract class StatementBase implements ParseNode {
      */
     public void setColLabels(List<String> colLabels) {
         List<String> oldLabels = getColLabels();
-        if (oldLabels == colLabels) return;
+        if (oldLabels == colLabels) {
+            return;
+        }
         oldLabels.clear();
         oldLabels.addAll(colLabels);
     }
@@ -136,7 +176,9 @@ public abstract class StatementBase implements ParseNode {
      * empty list if not applicable (not all statements produce an output result set).
      * Subclasses must override this as necessary.
      */
-    public List<Expr> getResultExprs() { return Collections.<Expr>emptyList(); }
+    public List<Expr> getResultExprs() {
+        return Collections.<Expr>emptyList();
+    }
 
     /**
      * Casts the result expressions and derived members (e.g., destination column types for
@@ -148,11 +190,11 @@ public abstract class StatementBase implements ParseNode {
         Preconditions.checkNotNull(resultExprs);
         Preconditions.checkState(resultExprs.size() == types.size());
         for (int i = 0; i < types.size(); ++i) {
-            //The specific type of the date type is determined by the 
+            //The specific type of the date type is determined by the
             //actual type of the return value, not by the function return value type in FE Function
             //such as the result of str_to_date may be either DATE or DATETIME
             if (resultExprs.get(i).getType().isDateType() && types.get(i).isDateType()) {
-                continue;                               
+                continue;
             }
             if (!resultExprs.get(i).getType().equals(types.get(i))) {
                 resultExprs.set(i, resultExprs.get(i).castTo(types.get(i)));
@@ -176,17 +218,19 @@ public abstract class StatementBase implements ParseNode {
      * @throws AnalysisException
      * @param rewriter
      */
-    public void foldConstant(ExprRewriter rewriter) throws AnalysisException {
+    public void foldConstant(ExprRewriter rewriter, TQueryOptions tQueryOptions) throws AnalysisException {
         throw new IllegalStateException(
                 "foldConstant() not implemented for this stmt: " + getClass().getSimpleName());
     }
 
-    public String getClusterName() {
-        return clusterName;
-    }
-
-    public void setClusterName(String clusterName) {
-        this.clusterName = clusterName;
+    /**
+     * rewrite element_at to slot in statement
+     * @throws AnalysisException
+     * @param rewriter
+     */
+    public void rewriteElementAtToSlot(ExprRewriter rewriter, TQueryOptions tQueryOptions) throws AnalysisException {
+        throw new IllegalStateException(
+                "rewriteElementAtToSlot() not implemented for this stmt: " + getClass().getSimpleName());
     }
 
     public void setOrigStmt(OriginStatement origStmt) {

@@ -17,20 +17,23 @@
 
 package org.apache.doris.load.loadv2;
 
+import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.AuthorizationInfo;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.MetaNotFoundException;
+import org.apache.doris.common.annotation.LogException;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.FailMsg;
 import org.apache.doris.load.FailMsg.CancelType;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Sets;
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Set;
 
@@ -40,7 +43,7 @@ import java.util.Set;
  * The state of insert load job is always finished, so it will never be scheduled by JobScheduler.
  */
 public class InsertLoadJob extends LoadJob {
-
+    @SerializedName("tid")
     private long tableId;
 
     // only for log replay
@@ -48,8 +51,9 @@ public class InsertLoadJob extends LoadJob {
         super(EtlJobType.INSERT);
     }
 
-    public InsertLoadJob(String label, long transactionId, long dbId, long tableId, long createTimestamp, String failMsg,
-            String trackingUrl) throws MetaNotFoundException {
+    public InsertLoadJob(String label, long transactionId, long dbId, long tableId,
+            long createTimestamp, String failMsg, String trackingUrl,
+            UserIdentity userInfo) throws MetaNotFoundException {
         super(EtlJobType.INSERT, dbId, label);
         this.tableId = tableId;
         this.transactionId = transactionId;
@@ -66,34 +70,53 @@ public class InsertLoadJob extends LoadJob {
         }
         this.authorizationInfo = gatherAuthInfo();
         this.loadingStatus.setTrackingUrl(trackingUrl);
+        this.userInfo = userInfo;
+    }
+
+    public InsertLoadJob(String label, long transactionId, long dbId, long tableId,
+                         long createTimestamp, String failMsg, String trackingUrl,
+                         UserIdentity userInfo, Long jobId) throws MetaNotFoundException {
+        super(EtlJobType.INSERT_JOB, dbId, label, jobId);
+        this.tableId = tableId;
+        this.transactionId = transactionId;
+        this.createTimestamp = createTimestamp;
+        this.loadStartTimestamp = createTimestamp;
+        this.finishTimestamp = System.currentTimeMillis();
+        if (Strings.isNullOrEmpty(failMsg)) {
+            this.state = JobState.FINISHED;
+            this.progress = 100;
+        } else {
+            this.state = JobState.CANCELLED;
+            this.failMsg = new FailMsg(CancelType.LOAD_RUN_FAIL, failMsg);
+            this.progress = 0;
+        }
+        this.authorizationInfo = gatherAuthInfo();
+        this.loadingStatus.setTrackingUrl(trackingUrl);
+        this.userInfo = userInfo;
     }
 
     public AuthorizationInfo gatherAuthInfo() throws MetaNotFoundException {
-        Database database = Catalog.getCurrentCatalog().getDbOrMetaException(dbId);
+        Database database = Env.getCurrentInternalCatalog().getDbOrMetaException(dbId);
         return new AuthorizationInfo(database.getFullName(), getTableNames());
     }
 
     @Override
     public Set<String> getTableNamesForShow() {
-        String name = Catalog.getCurrentCatalog().getDb(dbId).flatMap(db -> db.getTable(tableId))
-                .map(Table::getName).orElse(String.valueOf(tableId));
+        String name = Env.getCurrentInternalCatalog().getDb(dbId).flatMap(db -> db.getTable(tableId))
+                .map(TableIf::getName).orElse(String.valueOf(tableId));
         return Sets.newHashSet(name);
     }
 
+    @LogException
     @Override
     public Set<String> getTableNames() throws MetaNotFoundException {
-        Database database = Catalog.getCurrentCatalog().getDbOrMetaException(dbId);
+        Database database = Env.getCurrentInternalCatalog().getDbOrMetaException(dbId);
         Table table = database.getTableOrMetaException(tableId);
         return Sets.newHashSet(table.getName());
     }
 
     @Override
-    public void write(DataOutput out) throws IOException {
-        super.write(out);
-        out.writeLong(tableId);
-    }
-
-    public void readFields(DataInput in) throws IOException {
+    protected void readFields(DataInput in) throws IOException {
         super.readFields(in);
         tableId = in.readLong();
     }

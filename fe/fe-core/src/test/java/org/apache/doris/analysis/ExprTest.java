@@ -17,25 +17,29 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.jmockit.Deencapsulation;
+import org.apache.doris.datasource.InternalCatalog;
 
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import mockit.Expectations;
+import mockit.Injectable;
+import mockit.Mocked;
+import org.junit.Assert;
+import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import mockit.Expectations;
-import mockit.Injectable;
-import mockit.Mocked;
-import org.junit.Assert;
-import org.junit.Test;
-
 public class ExprTest {
+    private static final String internalCtl = InternalCatalog.INTERNAL_CATALOG_NAME;
 
     @Test
     public void testGetTableNameToColumnNames(@Mocked Analyzer analyzer,
@@ -45,8 +49,8 @@ public class ExprTest {
                                               @Injectable TupleDescriptor tupleDescriptor2,
                                               @Injectable Table tableA,
                                               @Injectable Table tableB) throws AnalysisException {
-        TableName tableAName = new TableName("test", "tableA");
-        TableName tableBName = new TableName("test", "tableB");
+        TableName tableAName = new TableName(internalCtl, "test", "tableA");
+        TableName tableBName = new TableName(internalCtl, "test", "tableB");
         SlotRef tableAColumn1 = new SlotRef(tableAName, "c1");
         SlotRef tableBColumn1 = new SlotRef(tableBName, "c1");
         Expr whereExpr = new BinaryPredicate(BinaryPredicate.Operator.EQ, tableAColumn1, tableBColumn1);
@@ -54,10 +58,6 @@ public class ExprTest {
         Deencapsulation.setField(tableBColumn1, "desc", slotDesc2);
         new Expectations() {
             {
-                slotDesc1.isMaterialized();
-                result = true;
-                slotDesc2.isMaterialized();
-                result = true;
                 slotDesc1.getColumn().getName();
                 result = "c1";
                 slotDesc2.getColumn().getName();
@@ -94,12 +94,12 @@ public class ExprTest {
         // uncheckedCastTo should return new object
 
         // date
-        DateLiteral dateLiteral = new DateLiteral(2020, 4, 5, 12, 0, 5);
-        Assert.assertTrue(dateLiteral.getType().equals(Type.DATETIME));
+        DateLiteral dateLiteral = new DateLiteral(2020, 4, 5, 12, 0, 5, Type.DATETIME);
+        Assert.assertEquals(dateLiteral.getType(), Type.DATETIME);
         DateLiteral castLiteral = (DateLiteral) dateLiteral.uncheckedCastTo(Type.DATE);
         Assert.assertFalse(dateLiteral == castLiteral);
-        Assert.assertTrue(dateLiteral.getType().equals(Type.DATETIME));
-        Assert.assertTrue(castLiteral.getType().equals(Type.DATE));
+        Assert.assertEquals(dateLiteral.getType(), Type.DATETIME);
+        Assert.assertEquals(castLiteral.getType(), Type.DATE);
 
         Assert.assertEquals(0, castLiteral.getHour());
         Assert.assertEquals(0, castLiteral.getMinute());
@@ -109,53 +109,63 @@ public class ExprTest {
         Assert.assertEquals(0, dateLiteral.getMinute());
         Assert.assertEquals(5, dateLiteral.getSecond());
 
-        DateLiteral dateLiteral2 = new DateLiteral(2020, 4, 5);
-        Assert.assertTrue(dateLiteral2.getType().equals(Type.DATE));
+        DateLiteral dateLiteral2 = new DateLiteral(2020, 4, 5, Type.DATE);
+        Assert.assertEquals(dateLiteral2.getType(), Type.DATE);
         castLiteral = (DateLiteral) dateLiteral2.uncheckedCastTo(Type.DATETIME);
         Assert.assertFalse(dateLiteral2 == castLiteral);
-        Assert.assertTrue(dateLiteral2.getType().equals(Type.DATE));
-        Assert.assertTrue(castLiteral.getType().equals(Type.DATETIME));
+        Assert.assertEquals(dateLiteral2.getType(), Type.DATE);
+        Assert.assertEquals(castLiteral.getType(), Type.DATETIME);
 
         Assert.assertEquals(0, castLiteral.getHour());
         Assert.assertEquals(0, castLiteral.getMinute());
         Assert.assertEquals(0, castLiteral.getSecond());
 
+        DateLiteral srcDate = new DateLiteral("2020-01-01", Type.DATE);
+        DateLiteral srcDateV2 = new DateLiteral("2020-01-01", Type.DATEV2);
+        DateLiteral srcDateTime = new DateLiteral("2020-01-01 12:34:45", Type.DATETIME);
+        Assert.assertEquals(20200101L, ((FloatLiteral) (new CastExpr(Type.FLOAT, srcDate)
+                .castTo(Type.FLOAT)).getResultValue(false)).getLongValue());
+        Assert.assertEquals(20200101L, ((FloatLiteral) new CastExpr(Type.FLOAT, srcDateV2)
+                .castTo(Type.FLOAT).getResultValue(false)).getLongValue());
+        Assert.assertEquals(20200101123445L, ((FloatLiteral) new CastExpr(Type.FLOAT, srcDateTime)
+                .castTo(Type.FLOAT).getResultValue(false)).getLongValue());
+
         // float
         FloatLiteral floatLiteral = new FloatLiteral(0.1, Type.FLOAT);
-        Assert.assertTrue(floatLiteral.getType().equals(Type.FLOAT));
+        Assert.assertEquals(floatLiteral.getType(), Type.FLOAT);
         FloatLiteral castFloatLiteral = (FloatLiteral) floatLiteral.uncheckedCastTo(Type.DOUBLE);
-        Assert.assertTrue(floatLiteral.getType().equals(Type.FLOAT));
-        Assert.assertTrue(castFloatLiteral.getType().equals(Type.DOUBLE));
+        Assert.assertEquals(floatLiteral.getType(), Type.FLOAT);
+        Assert.assertEquals(castFloatLiteral.getType(), Type.DOUBLE);
         Assert.assertFalse(floatLiteral == castFloatLiteral);
         FloatLiteral castFloatLiteral2 = (FloatLiteral) floatLiteral.uncheckedCastTo(Type.FLOAT);
         Assert.assertTrue(floatLiteral == castFloatLiteral2);
 
         // int
         IntLiteral intLiteral = new IntLiteral(200);
-        Assert.assertTrue(intLiteral.getType().equals(Type.SMALLINT));
+        Assert.assertEquals(intLiteral.getType(), Type.SMALLINT);
         IntLiteral castIntLiteral = (IntLiteral) intLiteral.uncheckedCastTo(Type.INT);
-        Assert.assertTrue(intLiteral.getType().equals(Type.SMALLINT));
-        Assert.assertTrue(castIntLiteral.getType().equals(Type.INT));
+        Assert.assertEquals(intLiteral.getType(), Type.SMALLINT);
+        Assert.assertEquals(castIntLiteral.getType(), Type.INT);
         Assert.assertFalse(intLiteral == castIntLiteral);
         IntLiteral castIntLiteral2 = (IntLiteral) intLiteral.uncheckedCastTo(Type.SMALLINT);
         Assert.assertTrue(intLiteral == castIntLiteral2);
 
         // null
         NullLiteral nullLiteral = NullLiteral.create(Type.DATE);
-        Assert.assertTrue(nullLiteral.getType().equals(Type.DATE));
+        Assert.assertEquals(nullLiteral.getType(), Type.DATE);
         NullLiteral castNullLiteral = (NullLiteral) nullLiteral.uncheckedCastTo(Type.DATETIME);
-        Assert.assertTrue(nullLiteral.getType().equals(Type.DATE));
-        Assert.assertTrue(castNullLiteral.getType().equals(Type.DATETIME));
+        Assert.assertEquals(nullLiteral.getType(), Type.DATE);
+        Assert.assertEquals(castNullLiteral.getType(), Type.DATETIME);
         Assert.assertFalse(nullLiteral == castNullLiteral);
         NullLiteral castNullLiteral2 = (NullLiteral) nullLiteral.uncheckedCastTo(Type.DATE);
         Assert.assertTrue(nullLiteral == castNullLiteral2);
 
         // string
         StringLiteral stringLiteral = new StringLiteral("abc");
-        Assert.assertTrue(stringLiteral.getType().equals(Type.VARCHAR));
+        Assert.assertEquals(stringLiteral.getType(), Type.VARCHAR);
         StringLiteral castStringLiteral = (StringLiteral) stringLiteral.uncheckedCastTo(Type.CHAR);
-        Assert.assertTrue(stringLiteral.getType().equals(Type.VARCHAR));
-        Assert.assertTrue(castStringLiteral.getType().equals(Type.CHAR));
+        Assert.assertEquals(stringLiteral.getType(), Type.VARCHAR);
+        Assert.assertEquals(castStringLiteral.getType(), Type.CHAR);
         Assert.assertFalse(stringLiteral == castStringLiteral);
         StringLiteral castStringLiteral2 = (StringLiteral) stringLiteral.uncheckedCastTo(Type.VARCHAR);
         Assert.assertTrue(stringLiteral == castStringLiteral2);
@@ -167,6 +177,10 @@ public class ExprTest {
         Expr r2 = new DateLiteral(2020, 10, 21);
         Expr r3 = new DateLiteral(2020, 10, 22);
         Expr r4 = new DateLiteral(2020, 10, 23);
+        Expr r5 = new DateLiteral(2020, 10, 23, Type.DATEV2);
+        Expr r6 = new DateLiteral(2020, 10, 23, 0, 0, 0, Type.DATETIME);
+        Expr r7 = new DateLiteral(2020, 10, 23, 0, 0, 0, Type.DATETIMEV2);
+        Expr r8 = new DateLiteral(2020, 10, 23, 0, 0, 0, ScalarType.createDatetimeV2Type(3));
 
         //list1 equal list2
         List<Expr> list1 = new ArrayList<>();
@@ -174,9 +188,17 @@ public class ExprTest {
         list1.add(r1);
         list1.add(r2);
         list1.add(r3);
+        list1.add(r5);
+        list1.add(r6);
+        list1.add(r7);
+        list1.add(r8);
         list2.add(r1);
         list2.add(r2);
         list2.add(r3);
+        list2.add(r5);
+        list2.add(r6);
+        list2.add(r7);
+        list2.add(r8);
         Assert.assertTrue(Expr.equalSets(list1, list2));
 
         //list3 not equal list4
@@ -185,8 +207,17 @@ public class ExprTest {
     }
 
     @Test
+    public void testUncheckedCastChildAvoidDoubleCast() throws AnalysisException {
+        Expr cast = new CastExpr(Type.DATETIME, new IntLiteral(10000101));
+        FunctionCallExpr call = new FunctionCallExpr("leap", Lists.newArrayList(cast));
+        call.uncheckedCastChild(Type.DATETIME, 0);
+        //do not cast a castExpr
+        Assertions.assertTrue(call.getChild(0).getChild(0) instanceof IntLiteral);
+    }
+
+    @Test
     public void testSrcSlotRef(@Injectable SlotDescriptor slotDescriptor) {
-        TableName tableName = new TableName("db1", "table1");
+        TableName tableName = new TableName(internalCtl, "db1", "table1");
         SlotRef slotRef = new SlotRef(tableName, "c1");
         slotRef.setDesc(slotDescriptor);
         Deencapsulation.setField(slotRef, "isAnalyzed", true);

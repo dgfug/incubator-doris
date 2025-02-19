@@ -18,11 +18,10 @@
 package org.apache.doris.httpv2.controller;
 
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
-import org.apache.doris.qe.HelpModule;
-import org.apache.doris.qe.HelpTopic;
+import org.apache.doris.qe.help.HelpModule;
+import org.apache.doris.qe.help.HelpTopic;
 
 import com.google.common.base.Strings;
-
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
@@ -31,18 +30,15 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
 import javax.servlet.http.HttpServletRequest;
 
 @RestController
 @RequestMapping("/rest/v1")
 public class HelpController {
 
-    private String queryString = null;
-
     @RequestMapping(path = "/help", method = RequestMethod.GET)
     public Object helpSearch(HttpServletRequest request) {
-        this.queryString = request.getParameter("query");
+        String queryString = request.getParameter("query");
         if (Strings.isNullOrEmpty(queryString)) {
             // ATTN: according to Mysql protocol, the default query should be "contents"
             //       when you want to get server side help.
@@ -51,17 +47,17 @@ public class HelpController {
             queryString = queryString.trim();
         }
         Map<String, Object> result = new HashMap<>();
-        appendHelpInfo(result);
+        appendHelpInfo(result, queryString);
         return ResponseEntityBuilder.ok(result);
     }
 
-    private void appendHelpInfo(Map<String, Object> result) {
-        appendExactMatchTopic(result);
-        appendFuzzyMatchTopic(result);
-        appendCategories(result);
+    private void appendHelpInfo(Map<String, Object> result, String queryString) {
+        appendExactMatchTopic(result, queryString);
+        appendFuzzyMatchTopic(result, queryString);
+        appendCategories(result, queryString);
     }
 
-    private void appendExactMatchTopic(Map<String, Object> result) {
+    private void appendExactMatchTopic(Map<String, Object> result, String queryString) {
         HelpModule module = HelpModule.getInstance();
         HelpTopic topic = module.getTopic(queryString);
         if (topic == null) {
@@ -73,7 +69,7 @@ public class HelpController {
         }
     }
 
-    private void appendFuzzyMatchTopic(Map<String, Object> result) {
+    private void appendFuzzyMatchTopic(Map<String, Object> result, String queryString) {
         HelpModule module = HelpModule.getInstance();
         List<String> topics = module.listTopicByKeyword(queryString);
         if (topics.isEmpty()) {
@@ -89,7 +85,7 @@ public class HelpController {
         }
     }
 
-    private void appendCategories(Map<String, Object> result) {
+    private void appendCategories(Map<String, Object> result, String queryString) {
         HelpModule module = HelpModule.getInstance();
         List<String> categories = module.listCategoryByName(queryString);
         if (categories.isEmpty()) {
@@ -99,14 +95,14 @@ public class HelpController {
             List<String> topics = module.listTopicByCategory(categories.get(0));
 
             if (topics.size() > 0) {
-                List<Map<String, String>> topic_list = new ArrayList<>();
+                List<Map<String, String>> topicList = new ArrayList<>();
                 result.put("topicSize", topics.size());
                 for (String topic : topics) {
                     Map<String, String> top = new HashMap<>();
                     top.put("name", topic);
-                    topic_list.add(top);
+                    topicList.add(top);
                 }
-                result.put("topicdatas", topic_list);
+                result.put("topicdatas", topicList);
             }
 
             List<String> subCategories = module.listCategoryByCategory(categories.get(0));
@@ -121,15 +117,15 @@ public class HelpController {
                 result.put("subdatas", subCate);
             }
         } else {
-            List<Map<String, String>> category_list = new ArrayList<>();
+            List<Map<String, String>> categoryList = new ArrayList<>();
             if (categories.size() > 0) {
                 result.put("categoriesSize", categories.size());
                 for (String cate : categories) {
                     Map<String, String> subMap = new HashMap<>();
                     subMap.put("name", cate);
-                    category_list.add(subMap);
+                    categoryList.add(subMap);
                 }
-                result.put("categoryDatas", category_list);
+                result.put("categoryDatas", categoryList);
             }
         }
     }

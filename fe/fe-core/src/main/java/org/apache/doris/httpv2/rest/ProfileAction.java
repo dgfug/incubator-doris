@@ -17,14 +17,13 @@
 
 package org.apache.doris.httpv2.rest;
 
-import org.apache.doris.common.util.ProfileManager;
+import org.apache.doris.common.profile.ProfileManager;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -32,12 +31,11 @@ import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
-
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 // This class is a RESTFUL interface to get query profile.
-// It will be used in query monitor to collect profiles.   
+// It will be used in query monitor to collect profiles.
 // Usage:
 //      wget http://fe_host:fe_http_port/api/profile?query_id=123456
 @RestController
@@ -62,5 +60,23 @@ public class ProfileAction extends RestBaseController {
         Map<String, String> result = Maps.newHashMap();
         result.put("profile", queryProfileStr);
         return ResponseEntityBuilder.ok(result);
+    }
+
+    @RequestMapping(path = "/api/profile/text", method = RequestMethod.GET)
+    protected Object profileText(HttpServletRequest request, HttpServletResponse response) {
+        executeCheckPassword(request, response);
+        checkGlobalAuth(ConnectContext.get().getCurrentUserIdentity(), PrivPredicate.ADMIN);
+
+        String queryId = request.getParameter("query_id");
+        if (Strings.isNullOrEmpty(queryId)) {
+            queryId = ProfileManager.getInstance().getLastProfileId();
+        }
+
+        String queryProfileStr = ProfileManager.getInstance().getProfile(queryId);
+        if (queryProfileStr == null) {
+            return "query id " + queryId + " not found";
+        }
+
+        return queryProfileStr;
     }
 }

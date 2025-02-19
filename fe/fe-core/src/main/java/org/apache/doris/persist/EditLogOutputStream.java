@@ -42,7 +42,7 @@ public abstract class EditLogOutputStream extends OutputStream {
     /**
      * Write edits log record into the stream. The record is represented by
      * operation name and an array of Writable arguments.
-     * 
+     *
      * @param op
      *            operation
      * @param writable
@@ -50,6 +50,8 @@ public abstract class EditLogOutputStream extends OutputStream {
      * @throws IOException
      */
     public abstract void write(short op, Writable writable) throws IOException;
+
+    public abstract void write(short op, byte[] data) throws IOException;
 
     abstract void create() throws IOException;
 
@@ -64,7 +66,7 @@ public abstract class EditLogOutputStream extends OutputStream {
     /**
      * Flush and sync all data that is ready to be flush
      * {@link #setReadyToFlush()} into underlying persistent store.
-     * 
+     *
      * @throws IOException
      */
     protected abstract void flushAndSync() throws IOException;

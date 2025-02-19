@@ -18,12 +18,14 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.datasource.InternalCatalog;
 
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 public class ShowRollupStmtTest {
+    private static final String internalCtl = InternalCatalog.INTERNAL_CATALOG_NAME;
     private Analyzer analyzer;
 
     @Before
@@ -34,31 +36,31 @@ public class ShowRollupStmtTest {
     @Test
     public void testNormal() throws AnalysisException {
         // use default database
-        ShowRollupStmt stmt = new ShowRollupStmt(new TableName("", "tbl"), "");
+        ShowRollupStmt stmt = new ShowRollupStmt(new TableName(internalCtl, "", "tbl"), "");
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:testDb", stmt.getDb());
+        Assert.assertEquals("testDb", stmt.getDb());
         Assert.assertEquals("tbl", stmt.getTbl());
-        Assert.assertEquals("SHOW ROLLUP FROM `testCluster:testDb`.`tbl`", stmt.toString());
+        Assert.assertEquals("SHOW ROLLUP FROM `testDb`.`tbl`", stmt.toString());
 
         // use table database
-        stmt = new ShowRollupStmt(new TableName("testDb1", "tbl"), "");
+        stmt = new ShowRollupStmt(new TableName(internalCtl, "testDb1", "tbl"), "");
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:testDb1", stmt.getDb());
+        Assert.assertEquals("testDb1", stmt.getDb());
         Assert.assertEquals("tbl", stmt.getTbl());
-        Assert.assertEquals("SHOW ROLLUP FROM `testCluster:testDb1`.`tbl`", stmt.toString());
+        Assert.assertEquals("SHOW ROLLUP FROM `testDb1`.`tbl`", stmt.toString());
 
         // use db database
-        stmt = new ShowRollupStmt(new TableName("testDb1", "tbl"), "testDb2");
+        stmt = new ShowRollupStmt(new TableName(internalCtl, "testDb1", "tbl"), "testDb2");
         stmt.analyze(analyzer);
-        Assert.assertEquals("testCluster:testDb2", stmt.getDb());
+        Assert.assertEquals("testDb2", stmt.getDb());
         Assert.assertEquals("tbl", stmt.getTbl());
-        Assert.assertEquals("SHOW ROLLUP FROM `testCluster:testDb2`.`tbl`", stmt.toString());
+        Assert.assertEquals("SHOW ROLLUP FROM `testDb2`.`tbl`", stmt.toString());
     }
 
     @Test(expected = AnalysisException.class)
     public void testNoTbl() throws AnalysisException {
         // use default database
-        ShowRollupStmt stmt = new ShowRollupStmt(new TableName("testDb", ""), "");
+        ShowRollupStmt stmt = new ShowRollupStmt(new TableName(internalCtl, "testDb", ""), "");
         stmt.analyze(analyzer);
         Assert.fail("No exception throws.");
     }

@@ -15,26 +15,34 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_COMPACTION_H
-#define DORIS_BE_SRC_OLAP_COMPACTION_H
+#pragma once
 
+#include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
+#include "cloud/cloud_tablet.h"
+#include "common/status.h"
+#include "io/io_common.h"
 #include "olap/merger.h"
 #include "olap/olap_common.h"
-#include "olap/olap_define.h"
-#include "olap/storage_engine.h"
-#include "olap/tablet.h"
-#include "olap/tablet_meta.h"
-#include "olap/utils.h"
-#include "rowset/rowset_id_generator.h"
-#include "util/semaphore.hpp"
+#include "olap/rowid_conversion.h"
+#include "olap/rowset/pending_rowset_helper.h"
+#include "olap/rowset/rowset_fwd.h"
+#include "olap/tablet_fwd.h"
+#include "util/runtime_profile.h"
 
 namespace doris {
 
-class DataDir;
-class Merger;
+class MemTrackerLimiter;
+class RowsetWriter;
+struct RowsetWriterContext;
+class StorageEngine;
+class CloudStorageEngine;
 
+static constexpr int COMPACTION_DELETE_BITMAP_LOCK_ID = -1;
+static constexpr int64_t INVALID_COMPACTION_INITIATOR_ID = -100;
 // This class is a base class for compaction.
 // The entrance of this class is compact()
 // Any compaction should go through four procedures.
@@ -44,70 +52,175 @@ class Merger;
 //  4. gc output rowset if failed
 class Compaction {
 public:
-    Compaction(TabletSharedPtr tablet, const std::string& label,
-               const std::shared_ptr<MemTracker>& parent_tracker);
+    Compaction(BaseTabletSPtr tablet, const std::string& label);
     virtual ~Compaction();
 
-    // This is only for http CompactionAction
-    OLAPStatus compact();
+    // Pick input rowsets satisfied to compact
+    virtual Status prepare_compact() = 0;
 
-    virtual OLAPStatus prepare_compact() = 0;
-    OLAPStatus execute_compact();
-    virtual OLAPStatus execute_compact_impl() = 0;
+    // Merge input rowsets to output rowset and modify tablet meta
+    virtual Status execute_compact() = 0;
 
-protected:
-    virtual OLAPStatus pick_rowsets_to_compact() = 0;
-    virtual std::string compaction_name() const = 0;
+    RuntimeProfile* runtime_profile() const { return _profile.get(); }
+
     virtual ReaderType compaction_type() const = 0;
-
-    OLAPStatus do_compaction(int64_t permits);
-    OLAPStatus do_compaction_impl(int64_t permits);
-
-    void modify_rowsets();
-    void gc_output_rowset();
-
-    OLAPStatus construct_output_rowset_writer();
-    OLAPStatus construct_input_rowset_readers();
-
-    OLAPStatus check_version_continuity(const std::vector<RowsetSharedPtr>& rowsets);
-    OLAPStatus check_correctness(const Merger::Statistics& stats);
-    OLAPStatus find_longest_consecutive_version(std::vector<RowsetSharedPtr>* rowsets,
-                                                std::vector<Version>* missing_version);
-    int64_t get_compaction_permits();
-
-private:
-    // get num rows from segment group meta of input rowsets.
-    // return -1 if these are not alpha rowsets.
-    int64_t _get_input_num_rows_from_seg_grps();
+    virtual std::string_view compaction_name() const = 0;
 
 protected:
+    Status merge_input_rowsets();
+
+    // merge inverted index files
+    Status do_inverted_index_compaction();
+
+    // mark all columns in columns_to_do_index_compaction to skip index compaction next time.
+    void mark_skip_index_compaction(const RowsetWriterContext& context,
+                                    const std::function<void(int64_t, int64_t)>& error_handler);
+
+    void construct_index_compaction_columns(RowsetWriterContext& ctx);
+
+    virtual Status construct_output_rowset_writer(RowsetWriterContext& ctx) = 0;
+
+    Status check_correctness();
+
+    int64_t get_avg_segment_rows();
+
+    void init_profile(const std::string& label);
+
+    void _load_segment_to_cache();
+
+    int64_t merge_way_num();
+
+    virtual Status update_delete_bitmap() = 0;
+
+    void agg_and_remove_old_version_delete_bitmap(
+            std::vector<RowsetSharedPtr>& pre_rowsets,
+            std::vector<std::tuple<int64_t, DeleteBitmap::BitmapKey, DeleteBitmap::BitmapKey>>&
+                    to_remove_vec,
+            DeleteBitmapPtr& new_delete_bitmap);
+
     // the root tracker for this compaction
-    std::shared_ptr<MemTracker> _mem_tracker;
+    std::shared_ptr<MemTrackerLimiter> _mem_tracker;
 
-    // the child of root, only track rowset readers mem
-    std::shared_ptr<MemTracker> _readers_tracker;
-
-    // the child of root, only track rowset writer mem
-    std::shared_ptr<MemTracker> _writer_tracker;
-    TabletSharedPtr _tablet;
+    BaseTabletSPtr _tablet;
 
     std::vector<RowsetSharedPtr> _input_rowsets;
-    std::vector<RowsetReaderSharedPtr> _input_rs_readers;
-    int64_t _input_rowsets_size;
-    int64_t _input_row_num;
+    int64_t _input_rowsets_data_size {0};
+    int64_t _input_rowsets_index_size {0};
+    int64_t _input_rowsets_total_size {0};
+    int64_t _input_row_num {0};
+    int64_t _input_num_segments {0};
+
+    Merger::Statistics _stats;
 
     RowsetSharedPtr _output_rowset;
     std::unique_ptr<RowsetWriter> _output_rs_writer;
 
-    enum CompactionState { INITED = 0, SUCCESS = 1 };
-    CompactionState _state;
+    enum CompactionState : uint8_t { INITED = 0, SUCCESS = 1 };
+    CompactionState _state {CompactionState::INITED};
+
+    bool _is_vertical;
+    bool _allow_delete_in_cumu_compaction;
 
     Version _output_version;
-    VersionHash _output_version_hash;
 
-    DISALLOW_COPY_AND_ASSIGN(Compaction);
+    int64_t _newest_write_timestamp {-1};
+    std::unique_ptr<RowIdConversion> _rowid_conversion = nullptr;
+    TabletSchemaSPtr _cur_tablet_schema;
+
+    std::unique_ptr<RuntimeProfile> _profile;
+
+    RuntimeProfile::Counter* _input_rowsets_data_size_counter = nullptr;
+    RuntimeProfile::Counter* _input_rowsets_counter = nullptr;
+    RuntimeProfile::Counter* _input_row_num_counter = nullptr;
+    RuntimeProfile::Counter* _input_segments_num_counter = nullptr;
+    RuntimeProfile::Counter* _merged_rows_counter = nullptr;
+    RuntimeProfile::Counter* _filtered_rows_counter = nullptr;
+    RuntimeProfile::Counter* _output_rowset_data_size_counter = nullptr;
+    RuntimeProfile::Counter* _output_row_num_counter = nullptr;
+    RuntimeProfile::Counter* _output_segments_num_counter = nullptr;
+    RuntimeProfile::Counter* _merge_rowsets_latency_timer = nullptr;
+};
+
+// `StorageEngine` mixin for `Compaction`
+class CompactionMixin : public Compaction {
+public:
+    CompactionMixin(StorageEngine& engine, TabletSharedPtr tablet, const std::string& label);
+
+    ~CompactionMixin() override;
+
+    Status execute_compact() override;
+
+    int64_t get_compaction_permits();
+
+    int64_t initiator() const { return INVALID_COMPACTION_INITIATOR_ID; }
+
+protected:
+    // Convert `_tablet` from `BaseTablet` to `Tablet`
+    Tablet* tablet();
+
+    Status construct_output_rowset_writer(RowsetWriterContext& ctx) override;
+
+    virtual Status modify_rowsets();
+
+    Status update_delete_bitmap() override;
+
+    StorageEngine& _engine;
+
+private:
+    Status execute_compact_impl(int64_t permits);
+
+    void build_basic_info();
+
+    // Return true if do ordered data compaction successfully
+    bool handle_ordered_data_compaction();
+
+    Status do_compact_ordered_rowsets();
+
+    void process_old_version_delete_bitmap();
+
+    bool _check_if_includes_input_rowsets(const RowsetIdUnorderedSet& commit_rowset_ids_set) const;
+
+    void update_compaction_level();
+
+    PendingRowsetGuard _pending_rs_guard;
+};
+
+class CloudCompactionMixin : public Compaction {
+public:
+    CloudCompactionMixin(CloudStorageEngine& engine, CloudTabletSPtr tablet,
+                         const std::string& label);
+
+    ~CloudCompactionMixin() override = default;
+
+    Status execute_compact() override;
+
+    int64_t initiator() const;
+
+protected:
+    CloudTablet* cloud_tablet() { return static_cast<CloudTablet*>(_tablet.get()); }
+
+    Status update_delete_bitmap() override;
+
+    virtual Status garbage_collection();
+
+    CloudStorageEngine& _engine;
+
+    std::string _uuid;
+
+    int64_t _expiration = 0;
+
+private:
+    Status construct_output_rowset_writer(RowsetWriterContext& ctx) override;
+
+    Status execute_compact_impl(int64_t permits);
+
+    void build_basic_info();
+
+    virtual Status modify_rowsets();
+
+    int64_t get_compaction_permits();
+
+    void update_compaction_level();
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_COMPACTION_H

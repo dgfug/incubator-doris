@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_MYSQL_MYSQL_ROW_BUFFER_H
-#define DORIS_BE_SRC_QUERY_MYSQL_MYSQL_ROW_BUFFER_H
+#pragma once
 
 #include <stdint.h>
 
@@ -25,17 +24,17 @@ namespace doris {
 /**
 // Now only support text protocol
  * helper for construct MySQL send row
- * The MYSQL protocal:
+ * The MYSQL protocol:
  *
  * | flag | (length) | value | flag | (length) | value | ......
  * <--------A column--------><--------A column--------><-.....->
  *
  * The flag means value's length or null value:
- * If value is NULL, flag is 251
+ * If value is nullptr, flag is 251
  * If value's length < 251, flag is the value's length
- * If 251 <= value's length < 65536, flag is 252 and the next two byte is length
- * If 65536 <= value's length < 16777216 , flag is 253 and the next three byte is length
- * If 16777216 <= value's length, flag is 254 and the next eighth byte is length
+ * If 251 <= value's length < 65536, flag is 252 and the next two bytes is length
+ * If 65536 <= value's length < 16777216 , flag is 253 and the next three bytes is length
+ * If 16777216 <= value's length, flag is 254 and the next eighth bytes is length
  *
  * the code example:
  *     mrb.push_null();
@@ -49,15 +48,21 @@ namespace doris {
  *
  */
 using int128_t = __int128;
-class DateTimeValue;
 class DecimalV2Value;
+class IPv4Value;
+class IPv6Value;
 
+template <bool is_binary_format = false>
 class MysqlRowBuffer {
 public:
     MysqlRowBuffer();
     ~MysqlRowBuffer();
 
     void reset() { _pos = _buf; }
+
+    // Prepare for binary row buffer
+    // init bitmap
+    void start_binary_row(uint64_t num_cols);
 
     // TODO(zhaochun): add signed/unsigned support
     int push_tinyint(int8_t data);
@@ -69,18 +74,25 @@ public:
     int push_float(float data);
     int push_double(double data);
     int push_time(double data);
-    int push_datetime(const DateTimeValue& data);
+    int push_timev2(double data, int scale);
+    template <typename DateType>
+    int push_datetime(const DateType& data, int scale);
     int push_decimal(const DecimalV2Value& data, int round_scale);
-    int push_string(const char* str, int length);
+    int push_ipv4(const IPv4Value& ipv4_val);
+    int push_ipv6(const IPv6Value& ipv6_val);
+    int push_string(const char* str, int64_t length);
     int push_null();
+
+    template <typename DateType>
+    int push_vec_datetime(DateType& data, int scale = -1);
 
     // this function reserved size, change the pos step size, return old pos
     // Becareful when use the returned pointer.
-    char* reserved(int size);
+    char* reserved(int64_t size);
 
     const char* buf() const { return _buf; }
     const char* pos() const { return _pos; }
-    int length() const { return _pos - _buf; }
+    int64_t length() const { return _pos - _buf; }
 
     /**
      * Why?
@@ -117,17 +129,23 @@ public:
     void close_dynamic_mode();
 
 private:
-    int reserve(int size);
+    int reserve(int64_t size);
 
-    char* _pos;
-    char* _buf;
-    int _buf_size;
+    // append data into buffer
+    int append(const char* data, int64_t len);
+    // the same as mysql net_store_data
+    // the first few bytes is length, followed by data
+    int append_var_string(const char* data, int64_t len);
+
+    char* _pos = nullptr;
+    char* _buf = nullptr;
+    int64_t _buf_size;
     char _default_buf[4096];
 
     int _dynamic_mode;
-    char* _len_pos;
+    uint64_t _len_pos;
+    uint32_t _field_pos = 0;
+    uint32_t _field_count = 0;
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_QUERY_MYSQL_MYSQL_ROW_BUFFER_H

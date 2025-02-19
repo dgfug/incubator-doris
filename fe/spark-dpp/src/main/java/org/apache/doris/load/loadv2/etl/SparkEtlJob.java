@@ -20,24 +20,31 @@ package org.apache.doris.load.loadv2.etl;
 import org.apache.doris.common.SparkDppException;
 import org.apache.doris.load.loadv2.dpp.GlobalDictBuilder;
 import org.apache.doris.load.loadv2.dpp.SparkDpp;
-import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumn;
-import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlColumnMapping;
-import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlFileGroup;
-import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlIndex;
-import org.apache.doris.load.loadv2.etl.EtlJobConfig.EtlTable;
+import org.apache.doris.sparkdpp.EtlJobConfig;
+import org.apache.doris.sparkdpp.EtlJobConfig.EtlColumn;
+import org.apache.doris.sparkdpp.EtlJobConfig.EtlColumnMapping;
+import org.apache.doris.sparkdpp.EtlJobConfig.EtlFileGroup;
+import org.apache.doris.sparkdpp.EtlJobConfig.EtlIndex;
+import org.apache.doris.sparkdpp.EtlJobConfig.EtlTable;
 
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.google.common.io.CharStreams;
 import org.apache.commons.collections.map.MultiValueMap;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.spark.SparkConf;
-import org.apache.spark.sql.Dataset;
+import org.apache.spark.deploy.SparkHadoopUtil;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,11 +62,14 @@ public class SparkEtlJob {
     private static final String BITMAP_DICT_FUNC = "bitmap_dict";
     private static final String TO_BITMAP_FUNC = "to_bitmap";
     private static final String BITMAP_HASH = "bitmap_hash";
+    private static final String BINARY_BITMAP = "binary_bitmap";
 
     private String jobConfigFilePath;
     private EtlJobConfig etlJobConfig;
     private Set<Long> hiveSourceTables;
     private Map<Long, Set<String>> tableToBitmapDictColumns;
+    private Map<Long, Set<String>> tableToBinaryBitmapColumns;
+    private final SparkConf conf;
     private SparkSession spark;
 
     private SparkEtlJob(String jobConfigFilePath) {
@@ -67,10 +77,11 @@ public class SparkEtlJob {
         this.etlJobConfig = null;
         this.hiveSourceTables = Sets.newHashSet();
         this.tableToBitmapDictColumns = Maps.newHashMap();
+        this.tableToBinaryBitmapColumns = Maps.newHashMap();
+        conf = new SparkConf();
     }
 
-    private void initSparkEnvironment() {
-        SparkConf conf = new SparkConf();
+    private void initSpark() {
         //serialization conf
         conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer");
         conf.set("spark.kryo.registrator", "org.apache.doris.load.loadv2.dpp.DorisKryoRegistrator");
@@ -83,17 +94,28 @@ public class SparkEtlJob {
             return;
         }
         for (Map.Entry<String, String> entry : configs.entrySet()) {
-            spark.sparkContext().conf().set(entry.getKey(), entry.getValue());
+            conf.set(entry.getKey(), entry.getValue());
+            conf.set("spark.hadoop." + entry.getKey(), entry.getValue());
         }
     }
 
-    private void initConfig() {
-        LOG.info("job config file path: " + jobConfigFilePath);
-        Dataset<String> ds = spark.read().textFile(jobConfigFilePath);
-        String jsonConfig = ds.first();
-        LOG.info("rdd read json config: " + jsonConfig);
+    private void initConfig() throws IOException {
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("job config file path: " + jobConfigFilePath);
+        }
+        Configuration hadoopConf = SparkHadoopUtil.get().newConfiguration(this.conf);
+        String jsonConfig;
+        Path path = new Path(jobConfigFilePath);
+        try (FileSystem fs = path.getFileSystem(hadoopConf); DataInputStream in = fs.open(path)) {
+            jsonConfig = CharStreams.toString(new InputStreamReader(in));
+        }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("rdd read json config: " + jsonConfig);
+        }
         etlJobConfig = EtlJobConfig.configFromJson(jsonConfig);
-        LOG.info("etl job config: " + etlJobConfig);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("etl job config: " + etlJobConfig);
+        }
     }
 
     /*
@@ -105,6 +127,8 @@ public class SparkEtlJob {
         for (Map.Entry<Long, EtlTable> entry : etlJobConfig.tables.entrySet()) {
             boolean isHiveSource = false;
             Set<String> bitmapDictColumns = Sets.newHashSet();
+            Set<String> binaryBitmapColumns = Sets.newHashSet();
+
             for (EtlFileGroup fileGroup : entry.getValue().fileGroups) {
                 if (fileGroup.sourceType == EtlJobConfig.SourceType.HIVE) {
                     isHiveSource = true;
@@ -117,7 +141,9 @@ public class SparkEtlJob {
                     if (funcName.equalsIgnoreCase(BITMAP_HASH)) {
                         throw new SparkDppException("spark load not support bitmap_hash now");
                     }
-                    if (funcName.equalsIgnoreCase(BITMAP_DICT_FUNC)) {
+                    if (funcName.equalsIgnoreCase(BINARY_BITMAP)) {
+                        binaryBitmapColumns.add(columnName.toLowerCase());
+                    } else if (funcName.equalsIgnoreCase(BITMAP_DICT_FUNC)) {
                         bitmapDictColumns.add(columnName.toLowerCase());
                     } else if (!funcName.equalsIgnoreCase(TO_BITMAP_FUNC)) {
                         newColumnMappings.put(mappingEntry.getKey(), mappingEntry.getValue());
@@ -132,17 +158,23 @@ public class SparkEtlJob {
             if (!bitmapDictColumns.isEmpty()) {
                 tableToBitmapDictColumns.put(entry.getKey(), bitmapDictColumns);
             }
+            if (!binaryBitmapColumns.isEmpty()) {
+                tableToBinaryBitmapColumns.put(entry.getKey(), binaryBitmapColumns);
+            }
         }
-        LOG.info("init hiveSourceTables: " + hiveSourceTables + ", tableToBitmapDictColumns: " + tableToBitmapDictColumns);
+        LOG.info("init hiveSourceTables: " + hiveSourceTables
+                + ",tableToBitmapDictColumns: " + tableToBitmapDictColumns);
 
         // spark etl must have only one table with bitmap type column to process.
-        if (hiveSourceTables.size() > 1 || tableToBitmapDictColumns.size() > 1) {
+        if (hiveSourceTables.size() > 1
+                || tableToBitmapDictColumns.size() > 1
+                || tableToBinaryBitmapColumns.size() > 1) {
             throw new Exception("spark etl job must have only one hive table with bitmap type column to process");
         }
     }
 
     private void processDpp() throws Exception {
-        SparkDpp sparkDpp = new SparkDpp(spark, etlJobConfig, tableToBitmapDictColumns);
+        SparkDpp sparkDpp = new SparkDpp(spark, etlJobConfig, tableToBitmapDictColumns, tableToBinaryBitmapColumns);
         sparkDpp.init();
         sparkDpp.doDpp();
     }
@@ -171,7 +203,8 @@ public class SparkEtlJob {
         String taskId = etlJobConfig.outputPath.substring(etlJobConfig.outputPath.lastIndexOf("/") + 1);
         String globalDictTableName = String.format(EtlJobConfig.GLOBAL_DICT_TABLE_NAME, tableId);
         String distinctKeyTableName = String.format(EtlJobConfig.DISTINCT_KEY_TABLE_NAME, tableId, taskId);
-        String dorisIntermediateHiveTable = String.format(EtlJobConfig.DORIS_INTERMEDIATE_HIVE_TABLE_NAME, tableId, taskId);
+        String dorisIntermediateHiveTable = String.format(
+                EtlJobConfig.DORIS_INTERMEDIATE_HIVE_TABLE_NAME, tableId, taskId);
         String sourceHiveFilter = fileGroup.where;
 
         // others
@@ -183,15 +216,15 @@ public class SparkEtlJob {
         LOG.info("global dict builder args, dictColumnMap: " + dictColumnMap
                          + ", dorisOlapTableColumnList: " + dorisOlapTableColumnList
                          + ", sourceHiveDBTableName: " + sourceHiveDBTableName
-                         + ", sourceHiveFilter: "+ sourceHiveFilter
+                         + ", sourceHiveFilter: " + sourceHiveFilter
                          + ", distinctKeyTableName: " + distinctKeyTableName
                          + ", globalDictTableName: " + globalDictTableName
                          + ", dorisIntermediateHiveTable: " + dorisIntermediateHiveTable);
         try {
-            GlobalDictBuilder globalDictBuilder = new GlobalDictBuilder(
-                    dictColumnMap, dorisOlapTableColumnList, mapSideJoinColumns, sourceHiveDBTableName,
-                    sourceHiveFilter, dorisHiveDB, distinctKeyTableName, globalDictTableName, dorisIntermediateHiveTable,
-                    buildConcurrency, veryHighCardinalityColumn, veryHighCardinalityColumnSplitNum, spark);
+            GlobalDictBuilder globalDictBuilder = new GlobalDictBuilder(dictColumnMap, dorisOlapTableColumnList,
+                    mapSideJoinColumns, sourceHiveDBTableName, sourceHiveFilter, dorisHiveDB, distinctKeyTableName,
+                    globalDictTableName, dorisIntermediateHiveTable, buildConcurrency, veryHighCardinalityColumn,
+                    veryHighCardinalityColumnSplitNum, spark);
             globalDictBuilder.createHiveIntermediateTable();
             globalDictBuilder.extractDistinctColumn();
             globalDictBuilder.buildGlobalDict();
@@ -227,12 +260,12 @@ public class SparkEtlJob {
             }
         }
 
+        initSpark();
         // data partition sort and aggregation
         processDpp();
     }
 
     private void run() throws Exception {
-        initSparkEnvironment();
         initConfig();
         checkConfig();
         processData();
@@ -248,7 +281,7 @@ public class SparkEtlJob {
             new SparkEtlJob(args[0]).run();
         } catch (Exception e) {
             System.err.println("spark etl job run failed");
-            e.printStackTrace();
+            LOG.warn("", e);
             System.exit(-1);
         }
     }

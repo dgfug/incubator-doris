@@ -17,21 +17,19 @@
 
 package org.apache.doris.httpv2.rest;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.MetaNotFoundException;
-import org.apache.doris.http.rest.RestBaseResult;
+import org.apache.doris.httpv2.entity.RestBaseResult;
 import org.apache.doris.load.Load;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
+import com.google.common.base.Strings;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.view.RedirectView;
-
-import com.google.common.base.Strings;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -42,10 +40,9 @@ import javax.servlet.http.HttpServletResponse;
 //     "status": "OK",
 //     "msg": "Success",
 //     "jobInfo": {
-//         "dbName": "default_cluster:db1",
+//         "dbName": "db1",
 //         "tblNames": ["tbl1"],
 //         "label": "abc",
-//         "clusterName": "default_cluster",
 //         "state": "FINISHED",
 //         "failMsg": "",
 //         "trackingUrl": "\\N"
@@ -54,37 +51,31 @@ import javax.servlet.http.HttpServletResponse;
 @RestController
 public class GetLoadInfoAction extends RestBaseController {
 
-    protected Catalog catalog;
-
     @RequestMapping(path = "/api/{" + DB_KEY + "}/_load_info", method = RequestMethod.GET)
     public Object execute(
             @PathVariable(value = DB_KEY) final String dbName,
             HttpServletRequest request, HttpServletResponse response) {
+        if (needRedirect(request.getScheme())) {
+            return redirectToHttps(request);
+        }
         executeCheckPassword(request, response);
 
-        this.catalog = Catalog.getCurrentCatalog();
         String fullDbName = getFullDbName(dbName);
 
         Load.JobInfo info = new Load.JobInfo(fullDbName,
-                request.getParameter(LABEL_KEY),
-                ConnectContext.get().getClusterName());
+                request.getParameter(LABEL_KEY));
         if (Strings.isNullOrEmpty(info.dbName)) {
             return new RestBaseResult("No database selected");
         }
         if (Strings.isNullOrEmpty(info.label)) {
             return new RestBaseResult("No label selected");
         }
-        if (Strings.isNullOrEmpty(info.clusterName)) {
-            return new RestBaseResult("No cluster selected");
-        }
-
-        RedirectView redirectView = redirectToMaster(request, response);
-        if (redirectView != null) {
-            return redirectView;
+        if (checkForwardToMaster(request)) {
+            return forwardToMaster(request);
         }
 
         try {
-            catalog.getLoadInstance().getJobInfo(info);
+            Env.getCurrentEnv().getLoadInstance().getJobInfo(info);
             if (info.tblNames.isEmpty()) {
                 checkDbAuth(ConnectContext.get().getCurrentUserIdentity(), info.dbName, PrivPredicate.LOAD);
             } else {
@@ -95,7 +86,7 @@ public class GetLoadInfoAction extends RestBaseController {
             }
         } catch (DdlException | MetaNotFoundException e) {
             try {
-                catalog.getLoadManager().getLoadJobInfo(info);
+                Env.getCurrentEnv().getLoadManager().getLoadJobInfo(info);
             } catch (DdlException e1) {
                 return new RestBaseResult(e.getMessage());
             }
@@ -113,4 +104,3 @@ public class GetLoadInfoAction extends RestBaseController {
         }
     }
 }
-

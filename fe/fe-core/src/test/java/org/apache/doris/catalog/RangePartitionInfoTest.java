@@ -17,18 +17,30 @@
 
 package org.apache.doris.catalog;
 
+import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.FunctionCallExpr;
 import org.apache.doris.analysis.PartitionKeyDesc;
 import org.apache.doris.analysis.PartitionKeyDesc.PartitionKeyValueType;
 import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.SinglePartitionDesc;
+import org.apache.doris.analysis.SlotRef;
+import org.apache.doris.analysis.StringLiteral;
+import org.apache.doris.analysis.TableName;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
+import org.apache.doris.common.io.Text;
+import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.collect.Lists;
-
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
@@ -375,5 +387,120 @@ public class RangePartitionInfoTest {
             singlePartitionDesc.analyze(columns, null);
             partitionInfo.handleNewSinglePartitionDesc(singlePartitionDesc, partitionId++, false);
         }
+    }
+
+    @Test(expected = AnalysisException.class)
+    public void testFixedRange7() throws DdlException, AnalysisException {
+        //add columns
+        Column k1 = new Column("k1", new ScalarType(PrimitiveType.DATEV2), true, null, "", "");
+        Column k2 = new Column("k2", new ScalarType(PrimitiveType.INT), true, null, "", "");
+        Column k3 = new Column("k3", new ScalarType(PrimitiveType.INT), true, null, "", "");
+        partitionColumns.add(k1);
+        partitionColumns.add(k2);
+        partitionColumns.add(k3);
+
+        //add RangePartitionDescs
+        PartitionKeyDesc p1 = PartitionKeyDesc.createLessThan(Lists.newArrayList(new PartitionValue("2019-02-01"),
+                new PartitionValue("100"), new PartitionValue("200")));
+        PartitionKeyDesc p2 = PartitionKeyDesc.createFixed(Lists.newArrayList(new PartitionValue("2020-02-01"),
+                new PartitionValue("100"), new PartitionValue("200")),
+                Lists.newArrayList(new PartitionValue("2020-03-01")));
+        PartitionKeyDesc p3 = PartitionKeyDesc.createLessThan(Lists.newArrayList(new PartitionValue("2021-02-01")));
+
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p1", p1, null));
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p2", p2, null));
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p3", p3, null));
+        partitionInfo = new RangePartitionInfo(partitionColumns);
+        PartitionKeyValueType partitionKeyValueType = PartitionKeyValueType.INVALID;
+        for (SinglePartitionDesc singlePartitionDesc : singlePartitionDescs) {
+            // check partitionType
+            if (partitionKeyValueType == PartitionKeyValueType.INVALID) {
+                partitionKeyValueType = singlePartitionDesc.getPartitionKeyDesc().getPartitionType();
+            } else if (partitionKeyValueType != singlePartitionDesc.getPartitionKeyDesc().getPartitionType()) {
+                throw new AnalysisException("You can only use one of these methods to create partitions");
+            }
+            singlePartitionDesc.analyze(partitionColumns.size(), null);
+            partitionInfo.handleNewSinglePartitionDesc(singlePartitionDesc, 20000L, false);
+        }
+    }
+
+    @Test (expected = DdlException.class)
+    public void testFixedRange8() throws DdlException, AnalysisException {
+        //add columns
+        int columns = 2;
+        Column k1 = new Column("k1", new ScalarType(PrimitiveType.DATEV2), true, null, "", "");
+        partitionColumns.add(k1);
+
+        //add RangePartitionDescs
+        PartitionKeyDesc p1 = PartitionKeyDesc.createFixed(
+                Lists.newArrayList(new PartitionValue("2021-06-01")),
+                Lists.newArrayList(new PartitionValue("2021-06-02")));
+
+        PartitionKeyDesc p2 = PartitionKeyDesc.createFixed(
+                Lists.newArrayList(new PartitionValue("2021-07-01")),
+                Lists.newArrayList(new PartitionValue("2021-08-01")));
+
+        PartitionKeyDesc p3 = PartitionKeyDesc.createFixed(
+                Lists.newArrayList(new PartitionValue("2021-06-01")),
+                Lists.newArrayList(new PartitionValue("2021-07-01")));
+
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p1", p1, null));
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p2", p2, null));
+        singlePartitionDescs.add(new SinglePartitionDesc(false, "p3", p3, null));
+        partitionInfo = new RangePartitionInfo(partitionColumns);
+
+        long partitionId = 20000L;
+        for (SinglePartitionDesc singlePartitionDesc : singlePartitionDescs) {
+            singlePartitionDesc.analyze(columns, null);
+            partitionInfo.handleNewSinglePartitionDesc(singlePartitionDesc, partitionId++, false);
+        }
+    }
+
+    @Test
+    public void testSerialization() throws IOException, AnalysisException, DdlException {
+        // 1. Write objects to file
+        final Path path = Files.createTempFile("rangePartitionInfo", "tmp");
+        DataOutputStream out = new DataOutputStream(Files.newOutputStream(path));
+
+        partitionInfo = new RangePartitionInfo(partitionColumns);
+
+        Text.writeString(out, GsonUtils.GSON.toJson(partitionInfo));
+        out.flush();
+        out.close();
+
+        // 2. Read objects from file
+        DataInputStream in = new DataInputStream(Files.newInputStream(path));
+
+        RangePartitionInfo partitionInfo2 = GsonUtils.GSON.fromJson(Text.readString(in), RangePartitionInfo.class);
+
+        Assert.assertEquals(partitionInfo.getType(), partitionInfo2.getType());
+
+        // 3. delete files
+        in.close();
+        Files.delete(path);
+    }
+
+    @Test
+    public void testAutotoSql() throws AnalysisException, DdlException {
+        Column k1 = new Column("k1", new ScalarType(PrimitiveType.DATEV2), true, null, "", "");
+        partitionColumns.add(k1);
+
+        ArrayList<Expr> params = new ArrayList<>();
+        SlotRef s1 = new SlotRef(new TableName("tbl"), "k1");
+        params.add(s1);
+        params.add(new StringLiteral("day"));
+
+        FunctionCallExpr f1 = new FunctionCallExpr("date_trunc", params);
+
+        ArrayList<Expr> partitionExprs = new ArrayList<>();
+        partitionExprs.add(f1);
+
+        partitionInfo = new RangePartitionInfo(true, partitionExprs, partitionColumns);
+        OlapTable table = new OlapTable();
+
+        String sql = partitionInfo.toSql(table, null);
+
+        String expected = "AUTO PARTITION BY RANGE (date_trunc(`tbl`.`k1`, 'day'))";
+        Assert.assertTrue("got: " + sql + ", should have: " + expected, sql.contains(expected));
     }
 }

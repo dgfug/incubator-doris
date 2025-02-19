@@ -35,24 +35,31 @@
 #include "olap/rowset/segment_v2/page_builder.h"
 #include "olap/rowset/segment_v2/page_decoder.h"
 #include "olap/types.h"
-#include "runtime/mem_pool.h"
 #include "util/coding.h"
 #include "util/faststring.h"
+#include "vec/columns/column_complex.h"
+#include "vec/columns/column_nullable.h"
 
 namespace doris {
 namespace segment_v2 {
 
-class BinaryPlainPageBuilder : public PageBuilder {
+template <FieldType Type>
+class BinaryPlainPageBuilder : public PageBuilderHelper<BinaryPlainPageBuilder<Type>> {
 public:
-    BinaryPlainPageBuilder(const PageBuilderOptions& options)
-            : _size_estimate(0), _prepared_size(0), _options(options) {
-        reset();
-    }
+    using Self = BinaryPlainPageBuilder<Type>;
+    friend class PageBuilderHelper<Self>;
+
+    Status init() override { return reset(); }
 
     bool is_page_full() override {
-        // data_page_size is 0, do not limit the page size
-        return _options.data_page_size != 0 && (_size_estimate > _options.data_page_size ||
-                                                _prepared_size > _options.data_page_size);
+        bool ret = false;
+        if (_options.is_dict_page) {
+            // dict_page_size is 0, do not limit the page size
+            ret = _options.dict_page_size != 0 && _size_estimate > _options.dict_page_size;
+        } else {
+            ret = _options.data_page_size != 0 && _size_estimate > _options.data_page_size;
+        }
+        return ret;
     }
 
     Status add(const uint8_t* vals, size_t* count) override {
@@ -62,10 +69,17 @@ public:
 
         // If the page is full, should stop adding more items.
         while (!is_page_full() && i < *count) {
-            auto src = reinterpret_cast<const Slice*>(vals);
+            const auto* src = reinterpret_cast<const Slice*>(vals);
+            if constexpr (Type == FieldType::OLAP_FIELD_TYPE_OBJECT) {
+                if (_options.need_check_bitmap) {
+                    RETURN_IF_ERROR(BitmapTypeCode::validate(*(src->data)));
+                }
+            }
             size_t offset = _buffer.size();
             _offsets.push_back(offset);
-            _buffer.append(src->data, src->size);
+            // This may need a large memory, should return error if could not allocated
+            // successfully, to avoid BE OOM.
+            RETURN_IF_CATCH_EXCEPTION(_buffer.append(src->data, src->size));
 
             _last_value_size = src->size;
             _size_estimate += src->size;
@@ -79,29 +93,36 @@ public:
         return Status::OK();
     }
 
-    OwnedSlice finish() override {
+    Status finish(OwnedSlice* slice) override {
         DCHECK(!_finished);
         _finished = true;
-        // Set up trailer
-        for (uint32_t _offset : _offsets) {
-            put_fixed32_le(&_buffer, _offset);
-        }
-        put_fixed32_le(&_buffer, _offsets.size());
-        if (_offsets.size() > 0) {
-            _copy_value_at(0, &_first_value);
-            _copy_value_at(_offsets.size() - 1, &_last_value);
-        }
-        return _buffer.build();
+        RETURN_IF_CATCH_EXCEPTION({
+            // Set up trailer
+            for (uint32_t _offset : _offsets) {
+                put_fixed32_le(&_buffer, _offset);
+            }
+            put_fixed32_le(&_buffer, _offsets.size());
+            if (_offsets.size() > 0) {
+                _copy_value_at(0, &_first_value);
+                _copy_value_at(_offsets.size() - 1, &_last_value);
+            }
+            *slice = _buffer.build();
+        });
+        return Status::OK();
     }
 
-    void reset() override {
-        _offsets.clear();
-        _buffer.clear();
-        _buffer.reserve(_options.data_page_size == 0 ? 1024 : _options.data_page_size);
-        _size_estimate = sizeof(uint32_t);
-        _prepared_size = sizeof(uint32_t);
-        _finished = false;
-        _last_value_size = 0;
+    Status reset() override {
+        RETURN_IF_CATCH_EXCEPTION({
+            _offsets.clear();
+            _buffer.clear();
+            _buffer.reserve(_options.data_page_size == 0
+                                    ? 1024
+                                    : std::min(_options.data_page_size, _options.dict_page_size));
+            _size_estimate = sizeof(uint32_t);
+            _finished = false;
+            _last_value_size = 0;
+        });
+        return Status::OK();
     }
 
     size_t count() const override { return _offsets.size(); }
@@ -111,7 +132,7 @@ public:
     Status get_first_value(void* value) const override {
         DCHECK(_finished);
         if (_offsets.size() == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         *reinterpret_cast<Slice*>(value) = Slice(_first_value);
         return Status::OK();
@@ -119,18 +140,26 @@ public:
     Status get_last_value(void* value) const override {
         DCHECK(_finished);
         if (_offsets.size() == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         *reinterpret_cast<Slice*>(value) = Slice(_last_value);
         return Status::OK();
     }
 
-    void update_prepared_size(size_t added_size) {
-        _prepared_size += added_size;
-        _prepared_size += sizeof(uint32_t);
+    inline Slice operator[](size_t idx) const {
+        DCHECK(!_finished);
+        DCHECK_LT(idx, _offsets.size());
+        size_t value_size =
+                (idx < _offsets.size() - 1) ? _offsets[idx + 1] - _offsets[idx] : _last_value_size;
+        return Slice(&_buffer[_offsets[idx]], value_size);
     }
 
+    inline Slice get(std::size_t idx) const { return (*this)[idx]; }
+
 private:
+    BinaryPlainPageBuilder(const PageBuilderOptions& options)
+            : _size_estimate(0), _options(options) {}
+
     void _copy_value_at(size_t idx, faststring* value) const {
         size_t value_size =
                 (idx < _offsets.size() - 1) ? _offsets[idx + 1] - _offsets[idx] : _last_value_size;
@@ -139,7 +168,6 @@ private:
 
     faststring _buffer;
     size_t _size_estimate;
-    size_t _prepared_size;
     // Offsets of each entry, relative to the start of the page
     std::vector<uint32_t> _offsets;
     bool _finished;
@@ -150,6 +178,7 @@ private:
     faststring _last_value;
 };
 
+template <FieldType Type>
 class BinaryPlainPageDecoder : public PageDecoder {
 public:
     BinaryPlainPageDecoder(Slice data) : BinaryPlainPageDecoder(data, PageDecoderOptions()) {}
@@ -166,17 +195,22 @@ public:
         CHECK(!_parsed);
 
         if (_data.size < sizeof(uint32_t)) {
-            std::stringstream ss;
-            ss << "file corruption: not enough bytes for trailer in BinaryPlainPageDecoder ."
-                  "invalid data size:"
-               << _data.size << ", trailer size:" << sizeof(uint32_t);
-            return Status::Corruption(ss.str());
+            return Status::Corruption(
+                    "file corruption: not enough bytes for trailer in BinaryPlainPageDecoder ."
+                    "invalid data size:{}, trailer size:{}",
+                    _data.size, sizeof(uint32_t));
         }
 
         // Decode trailer
         _num_elems = decode_fixed32_le((const uint8_t*)&_data[_data.get_size() - sizeof(uint32_t)]);
         _offsets_pos = _data.get_size() - (_num_elems + 1) * sizeof(uint32_t);
 
+        if (_offsets_pos > _data.get_size() - sizeof(uint32_t)) {
+            return Status::Corruption(
+                    "file corruption: offsets pos beyonds data_size: {}, num_element: {}"
+                    ", offset_pos: {}",
+                    _data.size, _num_elems, _offsets_pos);
+        }
         _parsed = true;
 
         return Status::OK();
@@ -188,7 +222,7 @@ public:
         return Status::OK();
     }
 
-    Status next_batch(size_t* n, ColumnBlockView* dst) override {
+    Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
         DCHECK(_parsed);
         if (PREDICT_FALSE(*n == 0 || _cur_idx >= _num_elems)) {
             *n = 0;
@@ -196,34 +230,60 @@ public:
         }
         const size_t max_fetch = std::min(*n, static_cast<size_t>(_num_elems - _cur_idx));
 
-        Slice* out = reinterpret_cast<Slice*>(dst->data());
-        size_t mem_len[max_fetch];
-        for (size_t i = 0; i < max_fetch; i++, out++, _cur_idx++) {
-            *out = string_at_index(_cur_idx);
-            mem_len[i] = out->size;
+        uint32_t last_offset = guarded_offset(_cur_idx);
+        _offsets.resize(max_fetch + 1);
+        _offsets[0] = last_offset;
+        for (int i = 0; i < max_fetch - 1; i++, _cur_idx++) {
+            const uint32_t start_offset = last_offset;
+            last_offset = guarded_offset(_cur_idx + 1);
+            _offsets[i + 1] = last_offset;
+            if constexpr (Type == FieldType::OLAP_FIELD_TYPE_OBJECT) {
+                if (_options.need_check_bitmap) {
+                    RETURN_IF_ERROR(BitmapTypeCode::validate(*(_data.data + start_offset)));
+                }
+            }
         }
-
-        // use SIMD instruction to speed up call function `RoundUpToPowerOfTwo`
-        auto mem_size = 0;
-        for (int i = 0; i < max_fetch; ++i) {
-            mem_len[i] = BitUtil::RoundUpToPowerOf2Int32(mem_len[i], MemPool::DEFAULT_ALIGNMENT);
-            mem_size += mem_len[i];
+        _cur_idx++;
+        _offsets[max_fetch] = offset(_cur_idx);
+        if constexpr (Type == FieldType::OLAP_FIELD_TYPE_OBJECT) {
+            if (_options.need_check_bitmap) {
+                RETURN_IF_ERROR(BitmapTypeCode::validate(*(_data.data + last_offset)));
+            }
         }
-
-        // allocate a batch of memory and do memcpy
-        out = reinterpret_cast<Slice*>(dst->data());
-        char* destination = (char*)dst->column_block()->pool()->allocate(mem_size);
-        if (destination == nullptr) {
-            return Status::MemoryAllocFailed(
-                    strings::Substitute("memory allocate failed, size:$0", mem_size));
-        }
-        for (int i = 0; i < max_fetch; ++i) {
-            out->relocate(destination);
-            destination += mem_len[i];
-            ++out;
-        }
+        dst->insert_many_continuous_binary_data(_data.data, _offsets.data(), max_fetch);
 
         *n = max_fetch;
+        return Status::OK();
+    }
+
+    Status read_by_rowids(const rowid_t* rowids, ordinal_t page_first_ordinal, size_t* n,
+                          vectorized::MutableColumnPtr& dst) override {
+        DCHECK(_parsed);
+        if (PREDICT_FALSE(*n == 0)) {
+            *n = 0;
+            return Status::OK();
+        }
+
+        auto total = *n;
+        size_t read_count = 0;
+        _binary_data.resize(total);
+        for (size_t i = 0; i < total; ++i) {
+            ordinal_t ord = rowids[i] - page_first_ordinal;
+            if (UNLIKELY(ord >= _num_elems)) {
+                break;
+            }
+
+            const uint32_t start_offset = offset(ord);
+            _binary_data[read_count].data = _data.mutable_data() + start_offset;
+            _binary_data[read_count].size = offset(ord + 1) - start_offset;
+            read_count++;
+        }
+
+        if (LIKELY(read_count > 0)) {
+            dst->insert_many_strings(_binary_data.data(), read_count);
+        }
+
+        *n = read_count;
         return Status::OK();
     }
 
@@ -243,14 +303,49 @@ public:
         return Slice(&_data[start_offset], len);
     }
 
+    Status get_dict_word_info(StringRef* dict_word_info) {
+        if (UNLIKELY(_num_elems <= 0)) {
+            return Status::OK();
+        }
+
+        char* data_begin = (char*)&_data[0];
+        char* offset_ptr = (char*)&_data[_offsets_pos];
+
+        for (uint32_t i = 0; i < _num_elems; ++i) {
+            uint32_t offset = decode_fixed32_le((uint8_t*)offset_ptr);
+            if (offset > _offsets_pos) {
+                return Status::Corruption(
+                        "file corruption: offsets pos beyonds data_size: {}, num_element: {}"
+                        ", offset_pos: {}, offset: {}",
+                        _data.size, _num_elems, _offsets_pos, offset);
+            }
+            dict_word_info[i].data = data_begin + offset;
+            offset_ptr += sizeof(uint32_t);
+        }
+
+        for (int i = 0; i < (int)_num_elems - 1; ++i) {
+            dict_word_info[i].size =
+                    (char*)dict_word_info[i + 1].data - (char*)dict_word_info[i].data;
+        }
+
+        dict_word_info[_num_elems - 1].size =
+                (data_begin + _offsets_pos) - (char*)dict_word_info[_num_elems - 1].data;
+        return Status::OK();
+    }
+
 private:
+    static constexpr size_t SIZE_OF_INT32 = sizeof(uint32_t);
     // Return the offset within '_data' where the string value with index 'idx' can be found.
     uint32_t offset(size_t idx) const {
         if (idx >= _num_elems) {
             return _offsets_pos;
         }
-        const uint8_t* p =
-                reinterpret_cast<const uint8_t*>(&_data[_offsets_pos + idx * sizeof(uint32_t)]);
+        return guarded_offset(idx);
+    }
+
+    uint32_t guarded_offset(size_t idx) const {
+        const auto* p =
+                reinterpret_cast<const uint8_t*>(&_data[_offsets_pos + idx * SIZE_OF_INT32]);
         return decode_fixed32_le(p);
     }
 
@@ -261,8 +356,13 @@ private:
     uint32_t _num_elems;
     uint32_t _offsets_pos;
 
+    std::vector<uint32_t> _offsets;
+    std::vector<StringRef> _binary_data;
+
     // Index of the currently seeked element in the page.
     uint32_t _cur_idx;
+    friend class BinaryDictPageDecoder;
+    friend class FileColumnIterator;
 };
 
 } // namespace segment_v2

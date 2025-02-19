@@ -30,28 +30,30 @@ public class CloneTask extends AgentTask {
     public static final int VERSION_2 = 2;
 
     private int schemaHash;
+    private long replicaId;
     private List<TBackend> srcBackends;
     private TStorageMedium storageMedium;
+    private TBackend destBackend;
 
     private long visibleVersion;
-    private long visibleVersionHash;
 
     private long srcPathHash = -1;
     private long destPathHash = -1;
-    
+
     private int timeoutS;
 
     private int taskVersion = VERSION_1;
 
-    public CloneTask(long backendId, long dbId, long tableId, long partitionId, long indexId,
-                     long tabletId, int schemaHash, List<TBackend> srcBackends, TStorageMedium storageMedium,
-                     long visibleVersion, long visibleVersionHash, int timeoutS) {
+    public CloneTask(TBackend destBackend, long backendId, long dbId, long tableId, long partitionId,
+            long indexId, long tabletId, long replicaId, int schemaHash, List<TBackend> srcBackends,
+            TStorageMedium storageMedium, long visibleVersion, int timeoutS) {
         super(null, backendId, TTaskType.CLONE, dbId, tableId, partitionId, indexId, tabletId);
+        this.destBackend = destBackend;
+        this.replicaId = replicaId;
         this.schemaHash = schemaHash;
         this.srcBackends = srcBackends;
         this.storageMedium = storageMedium;
         this.visibleVersion = visibleVersion;
-        this.visibleVersionHash = visibleVersionHash;
         this.timeoutS = timeoutS;
     }
 
@@ -67,10 +69,6 @@ public class CloneTask extends AgentTask {
         return visibleVersion;
     }
 
-    public long getVisibleVersionHash() {
-        return visibleVersionHash;
-    }
-
     public void setPathHash(long srcPathHash, long destPathHash) {
         this.srcPathHash = srcPathHash;
         this.destPathHash = destPathHash;
@@ -83,27 +81,33 @@ public class CloneTask extends AgentTask {
 
     public TCloneReq toThrift() {
         TCloneReq request = new TCloneReq(tabletId, schemaHash, srcBackends);
+        request.setReplicaId(replicaId);
         request.setStorageMedium(storageMedium);
-        request.setCommittedVersion(visibleVersion);
-        request.setCommittedVersionHash(visibleVersionHash);
+        request.setVersion(visibleVersion);
         request.setTaskVersion(taskVersion);
+        request.setPartitionId(partitionId);
         if (taskVersion == VERSION_2) {
             request.setSrcPathHash(srcPathHash);
             request.setDestPathHash(destPathHash);
         }
         request.setTimeoutS(timeoutS);
-
+        request.setTableId(tableId);
         return request;
     }
 
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        sb.append("tablet id: ").append(tabletId).append(", schema hash: ").append(schemaHash);
+        sb.append("tablet id: ").append(tabletId)
+                .append(", replica id: ").append(replicaId)
+                .append(", schema hash: ").append(schemaHash);
         sb.append(", storageMedium: ").append(storageMedium.name());
-        sb.append(", visible version(hash): ").append(visibleVersion).append("-").append(visibleVersionHash);
-        sb.append(", src backend: ").append(srcBackends.get(0).getHost()).append(", src path hash: ").append(srcPathHash);
-        sb.append(", dest backend: ").append(backendId).append(", dest path hash: ").append(destPathHash);
+        sb.append(", visible version: ").append(visibleVersion);
+        sb.append(", src backend: ").append(srcBackends.get(0).getHost())
+                .append(", src path hash: ").append(srcPathHash);
+        sb.append(", dest backend id: ").append(backendId)
+                .append(", dest backend: ").append(destBackend.getHost())
+                .append(", dest path hash: ").append(destPathHash);
         return sb.toString();
     }
 }

@@ -32,7 +32,7 @@ import java.util.List;
 public class SyncChecker extends MasterDaemon {
     private static final Logger LOG = LogManager.getLogger(SyncChecker.class);
 
-    private SyncJobManager syncJobManager;
+    private final SyncJobManager syncJobManager;
 
     public SyncChecker(SyncJobManager syncJobManager) {
         super("sync checker", Config.sync_checker_interval_second * 1000L);
@@ -41,9 +41,12 @@ public class SyncChecker extends MasterDaemon {
 
     @Override
     protected void runAfterCatalogReady() {
-        LOG.debug("start check sync jobs.");
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("start check sync jobs.");
+        }
         try {
             process();
+            cleanOldSyncJobs();
         } catch (Throwable e) {
             LOG.warn("Failed to process one round of SyncChecker", e);
         }
@@ -59,7 +62,7 @@ public class SyncChecker extends MasterDaemon {
             UserException exception = null;
             try {
                 job.execute();
-            } catch (MetaNotFoundException| DdlException e) {
+            } catch (MetaNotFoundException | DdlException e) {
                 msgType = SyncFailMsg.MsgType.SCHEDULE_FAIL;
                 exception = e;
                 LOG.warn(e.getMessage());
@@ -73,5 +76,11 @@ public class SyncChecker extends MasterDaemon {
                 job.cancel(msgType, exception.getMessage());
             }
         }
+    }
+
+    private void cleanOldSyncJobs() {
+        // clean up expired sync jobs
+        this.syncJobManager.cleanOldSyncJobs();
+        this.syncJobManager.cleanOverLimitSyncJobs();
     }
 }

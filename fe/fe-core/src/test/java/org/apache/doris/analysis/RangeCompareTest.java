@@ -4,7 +4,7 @@
 // regarding copyright ownership.  The ASF licenses this file
 // to you under the Apache License, Version 2.0 (the
 // "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the Licenser at
+// with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
 //
@@ -24,11 +24,10 @@ import com.google.common.collect.BoundType;
 import com.google.common.collect.Range;
 import com.google.common.collect.RangeSet;
 import com.google.common.collect.TreeRangeSet;
-
-import java.util.Set;
-
 import org.junit.Assert;
 import org.junit.Test;
+
+import java.util.Set;
 
 public class RangeCompareTest {
 
@@ -64,7 +63,7 @@ public class RangeCompareTest {
         LiteralExpr upperBoundOfRange2 = new IntLiteral(1);
         Range<LiteralExpr> range2 = Range.lessThan(upperBoundOfRange2);
         try {
-            Range<LiteralExpr> intersectionRange = range1.intersection(range2);
+            range1.intersection(range2);
             Assert.fail();
         } catch (IllegalArgumentException e) {
             System.out.println(e);
@@ -81,7 +80,7 @@ public class RangeCompareTest {
         LiteralExpr upperBoundOfRange2 = new DecimalLiteral("0.1");
         Range<LiteralExpr> range2 = Range.lessThan(upperBoundOfRange2);
         try {
-            Range<LiteralExpr> intersectionRange = range1.intersection(range2);
+            range1.intersection(range2);
             Assert.fail();
         } catch (IllegalArgumentException e) {
             System.out.println(e);
@@ -222,6 +221,22 @@ public class RangeCompareTest {
         LiteralExpr lowerBoundOfRange1 = new DecimalLiteral("3.0");
         Range<LiteralExpr> range1 = Range.lessThan(lowerBoundOfRange1);
         LiteralExpr upperBoundOfRange2 = new DateLiteral("2021-01-01", Type.DATE);
+        Range<LiteralExpr> range2 = Range.atLeast(upperBoundOfRange2);
+        RangeSet<LiteralExpr> rangeSet = TreeRangeSet.create();
+        rangeSet.add(range1);
+        try {
+            rangeSet.add(range2);
+            Assert.fail();
+        } catch (ClassCastException e) {
+            System.out.println(e);
+        }
+    }
+
+    @Test
+    public void testMergeRangeWithDifferentType2() throws AnalysisException {
+        LiteralExpr lowerBoundOfRange1 = new DecimalLiteral("3.0");
+        Range<LiteralExpr> range1 = Range.lessThan(lowerBoundOfRange1);
+        LiteralExpr upperBoundOfRange2 = new DateLiteral("2021-01-01", Type.DATEV2);
         Range<LiteralExpr> range2 = Range.atLeast(upperBoundOfRange2);
         RangeSet<LiteralExpr> rangeSet = TreeRangeSet.create();
         rangeSet.add(range1);

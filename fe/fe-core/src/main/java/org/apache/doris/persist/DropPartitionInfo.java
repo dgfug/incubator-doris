@@ -17,8 +17,6 @@
 
 package org.apache.doris.persist;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonUtils;
@@ -34,30 +32,59 @@ public class DropPartitionInfo implements Writable {
     private Long dbId;
     @SerializedName(value = "tableId")
     private Long tableId;
+    @SerializedName(value = "pid")
+    private Long partitionId;
     @SerializedName(value = "partitionName")
     private String partitionName;
     @SerializedName(value = "isTempPartition")
     private boolean isTempPartition = false;
     @SerializedName(value = "forceDrop")
     private boolean forceDrop = false;
-    
-    private DropPartitionInfo() {
-    }
+    @SerializedName(value = "recycleTime")
+    private long recycleTime = 0;
+    @SerializedName(value = "sql")
+    private String sql;
+    @SerializedName(value = "version")
+    private long version = 0L;
+    @SerializedName(value = "versionTime")
+    private long versionTime = 0L;
 
-    public DropPartitionInfo(Long dbId, Long tableId, String partitionName, boolean isTempPartition, boolean forceDrop) {
+    public DropPartitionInfo(Long dbId, Long tableId, Long partitionId, String partitionName,
+            boolean isTempPartition, boolean forceDrop, long recycleTime, long version, long versionTime) {
         this.dbId = dbId;
         this.tableId = tableId;
+        this.partitionId = partitionId;
         this.partitionName = partitionName;
         this.isTempPartition = isTempPartition;
         this.forceDrop = forceDrop;
+        this.recycleTime = recycleTime;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("DROP ");
+        if (isTempPartition) {
+            sb.append("TEMPORARY ");
+        }
+        sb.append("PARTITION `").append(partitionName).append("`");
+        if (forceDrop) {
+            sb.append(" FORCE");
+        }
+        this.sql = sb.toString();
+        this.version = version;
+        this.versionTime = versionTime;
     }
-    
+
     public Long getDbId() {
         return dbId;
     }
-    
+
     public Long getTableId() {
         return tableId;
+    }
+
+    public Long getPartitionId() {
+        // the field partition ID was added in PR: apache/doris#37196, the old version doesn't
+        // contain this field so it will be null.
+        return partitionId == null ? -1 : partitionId;
     }
 
     public String getPartitionName() {
@@ -72,28 +99,40 @@ public class DropPartitionInfo implements Writable {
         return forceDrop;
     }
 
-    @Deprecated
-    private void readFields(DataInput in) throws IOException {
-        dbId = in.readLong();
-        tableId = in.readLong();
-        partitionName = Text.readString(in);
+    public Long getRecycleTime() {
+        return recycleTime;
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public long getVersionTime() {
+        return versionTime;
     }
 
     public static DropPartitionInfo read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_74) {
-            DropPartitionInfo info = new DropPartitionInfo();
-            info.readFields(in);
-            return info;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, DropPartitionInfo.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, DropPartitionInfo.class);
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
         String json = GsonUtils.GSON.toJson(this);
         Text.writeString(out, json);
+    }
+
+    public static DropPartitionInfo fromJson(String data) {
+        return GsonUtils.GSON.fromJson(data, DropPartitionInfo.class);
+    }
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
+    }
+
+    @Override
+    public String toString() {
+        return toJson();
     }
 
     @Override
@@ -104,13 +143,15 @@ public class DropPartitionInfo implements Writable {
         if (!(obj instanceof DropPartitionInfo)) {
             return false;
         }
-        
+
         DropPartitionInfo info = (DropPartitionInfo) obj;
-        
+
         return (dbId.equals(info.dbId))
                 && (tableId.equals(info.tableId))
+                && (partitionId.equals(info.partitionId))
                 && (partitionName.equals(info.partitionName))
                 && (isTempPartition == info.isTempPartition)
-                && (forceDrop == info.forceDrop);
+                && (forceDrop == info.forceDrop)
+                && (recycleTime == info.recycleTime);
     }
 }

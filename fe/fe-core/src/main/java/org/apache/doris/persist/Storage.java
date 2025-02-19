@@ -21,7 +21,7 @@ import org.apache.doris.ha.FrontendNodeType;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-
+import com.google.common.collect.Lists;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -30,6 +30,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -54,13 +55,19 @@ public class Storage {
     public static final String IMAGE_NEW = "image.ckpt";
     public static final String VERSION_FILE = "VERSION";
     public static final String ROLE_FILE = "ROLE";
+    public static final String DEPLOY_MODE_FILE = "DEPLOY_MODE";
+    public static final String DEPLOY_MODE = "deploy_mode";
+    public static final String CLOUD_MODE = "cloud";
+    public static final String LOCAL_MODE = "local";
 
     private int clusterID = 0;
     private String token;
     private FrontendNodeType role = FrontendNodeType.UNKNOWN;
     private String nodeName;
+    private String deployMode;
     private long editsSeq;
-    private long imageSeq;
+    private long latestImageSeq = 0;
+    private long latestValidatedImageSeq = 0;
     private String metaDir;
     private List<Long> editsFileSequenceNumbers;
 
@@ -70,11 +77,11 @@ public class Storage {
         this.metaDir = metaDir;
     }
 
-    public Storage(int clusterID, String token, long imageSeq, long editsSeq, String metaDir) {
+    public Storage(int clusterID, String token, long latestImageSeq, long editsSeq, String metaDir) {
         this.clusterID = clusterID;
         this.token = token;
         this.editsSeq = editsSeq;
-        this.imageSeq = imageSeq;
+        this.latestImageSeq = latestImageSeq;
         this.metaDir = metaDir;
     }
 
@@ -95,9 +102,9 @@ public class Storage {
         Properties prop = new Properties();
         File versionFile = getVersionFile();
         if (versionFile.isFile()) {
-            FileInputStream in = new FileInputStream(versionFile);
-            prop.load(in);
-            in.close();
+            try (FileInputStream in = new FileInputStream(versionFile)) {
+                prop.load(in);
+            }
             clusterID = Integer.parseInt(prop.getProperty(CLUSTER_ID));
             if (prop.getProperty(TOKEN) != null) {
                 token = prop.getProperty(TOKEN);
@@ -106,47 +113,57 @@ public class Storage {
 
         File roleFile = getRoleFile();
         if (roleFile.isFile()) {
-            FileInputStream in = new FileInputStream(roleFile);
-            prop.load(in);
-            in.close();
+            try (FileInputStream in = new FileInputStream(roleFile)) {
+                prop.load(in);
+            }
             role = FrontendNodeType.valueOf(prop.getProperty(FRONTEND_ROLE));
             // For compatibility, NODE_NAME may not exist in ROLE file, set nodeName to null
             nodeName = prop.getProperty(NODE_NAME, null);
         }
 
-        // Find the latest image
+        File modeFile = getModeFile();
+        if (modeFile.isFile()) {
+            try (FileInputStream in = new FileInputStream(modeFile)) {
+                prop.load(in);
+            }
+            deployMode = prop.getProperty(DEPLOY_MODE);
+        }
+
+        // Find the latest two images
         File dir = new File(metaDir);
         File[] children = dir.listFiles();
         if (children == null) {
             return;
-        } else {
-            for (File child : children) {
-                String name = child.getName();
-                try {
-                    if (!name.equals(EDITS) && !name.equals(IMAGE_NEW)
-                            && !name.endsWith(".part") && name.contains(".")) {
-                        if (name.startsWith(IMAGE)) {
-                            imageSeq = Math.max(Long.parseLong(name.substring(name.lastIndexOf('.') + 1)), imageSeq);
-                        } else if (name.startsWith(EDITS)) {
-                            // Just record the sequence part of the file name
-                            editsFileSequenceNumbers.add(Long.parseLong(name.substring(name.lastIndexOf('.') + 1)));
-                            editsSeq = Math.max(Long.parseLong(name.substring(name.lastIndexOf('.') + 1)), editsSeq);
+        }
+        List<Long> imageIds = Lists.newArrayList();
+        for (File child : children) {
+            String name = child.getName();
+            try {
+                if (!name.equals(EDITS) && !name.equals(IMAGE_NEW)
+                        && !name.endsWith(".part") && name.contains(".")) {
+                    if (name.startsWith(IMAGE)) {
+                        long fileSeq = Long.parseLong(name.substring(name.lastIndexOf('.') + 1));
+                        imageIds.add(fileSeq);
+                        if (latestImageSeq < fileSeq) {
+                            latestImageSeq = fileSeq;
                         }
+                    } else if (name.startsWith(EDITS)) {
+                        // Just record the sequence part of the file name
+                        editsFileSequenceNumbers.add(Long.parseLong(name.substring(name.lastIndexOf('.') + 1)));
+                        editsSeq = Math.max(Long.parseLong(name.substring(name.lastIndexOf('.') + 1)), editsSeq);
                     }
-                } catch (Exception e) {
-                    LOG.warn(name + " is not a validate meta file, ignore it");
                 }
+            } catch (Exception e) {
+                LOG.warn(name + " is not a validate meta file, ignore it");
             }
         }
-
+        // set latestValidatedImageSeq to the second largest image id, or 0 if less than 2 images.
+        Collections.sort(imageIds);
+        latestValidatedImageSeq = imageIds.size() < 2 ? 0 : imageIds.get(imageIds.size() - 2);
     }
 
     public int getClusterID() {
         return clusterID;
-    }
-
-    public void setClusterID(int clusterID) {
-        this.clusterID = clusterID;
     }
 
     public String getToken() {
@@ -161,6 +178,14 @@ public class Storage {
         return role;
     }
 
+    public String getDeployMode() {
+        return deployMode;
+    }
+
+    public void setDeployMode(String deployMode) {
+        this.deployMode = deployMode;
+    }
+
     public String getNodeName() {
         return nodeName;
     }
@@ -169,20 +194,12 @@ public class Storage {
         return metaDir;
     }
 
-    public void setMetaDir(String metaDir) {
-        this.metaDir = metaDir;
+    public long getLatestImageSeq() {
+        return latestImageSeq;
     }
 
-    public long getImageSeq() {
-        return imageSeq;
-    }
-
-    public void setImageSeq(long imageSeq) {
-        this.imageSeq = imageSeq;
-    }
-
-    public void setEditsSeq(long editsSeq) {
-        this.editsSeq = editsSeq;
+    public long getLatestValidatedImageSeq() {
+        return latestValidatedImageSeq;
     }
 
     public long getEditsSeq() {
@@ -190,8 +207,7 @@ public class Storage {
     }
 
     public static int newClusterID() {
-        Random random = new Random();
-        random.setSeed(System.currentTimeMillis());
+        Random random = new SecureRandom();
 
         int newID = 0;
         while (newID == 0) {
@@ -217,20 +233,7 @@ public class Storage {
         Properties properties = new Properties();
         setFields(properties);
 
-        RandomAccessFile file = new RandomAccessFile(new File(metaDir, VERSION_FILE), "rws");
-        FileOutputStream out = null;
-
-        try {
-            file.seek(0);
-            out = new FileOutputStream(file.getFD());
-            properties.store(out, null);
-            file.setLength(out.getChannel().position());
-        } finally {
-            if (out != null) {
-                out.close();
-            }
-            file.close();
-        }
+        writePropertiesToFile(properties, VERSION_FILE);
     }
 
     public void writeFrontendRoleAndNodeName(FrontendNodeType role, String nameNode) throws IOException {
@@ -239,7 +242,17 @@ public class Storage {
         properties.setProperty(FRONTEND_ROLE, role.name());
         properties.setProperty(NODE_NAME, nameNode);
 
-        RandomAccessFile file = new RandomAccessFile(new File(metaDir, ROLE_FILE), "rws");
+        writePropertiesToFile(properties, ROLE_FILE);
+    }
+
+    public void writeClusterMode() throws IOException {
+        Properties properties = new Properties();
+        properties.setProperty(DEPLOY_MODE, deployMode);
+        writePropertiesToFile(properties, DEPLOY_MODE_FILE);
+    }
+
+    private void writePropertiesToFile(Properties properties, String fileName) throws IOException {
+        RandomAccessFile file = new RandomAccessFile(new File(metaDir, fileName), "rws");
         FileOutputStream out = null;
 
         try {
@@ -255,6 +268,7 @@ public class Storage {
         }
     }
 
+    // Only for test
     public void clear() throws IOException {
         File metaFile = new File(metaDir);
         if (metaFile.exists()) {
@@ -281,7 +295,7 @@ public class Storage {
     }
 
     public File getCurrentImageFile() {
-        return getImageFile(imageSeq);
+        return getImageFile(latestImageSeq);
     }
 
     public File getImageFile(long version) {
@@ -298,6 +312,10 @@ public class Storage {
 
     public final File getRoleFile() {
         return new File(metaDir, ROLE_FILE);
+    }
+
+    public final File getModeFile() {
+        return new File(metaDir, DEPLOY_MODE_FILE);
     }
 
     public File getCurrentEditsFile() {
@@ -322,4 +340,3 @@ public class Storage {
     }
 
 }
-

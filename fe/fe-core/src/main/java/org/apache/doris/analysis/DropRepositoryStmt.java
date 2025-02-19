@@ -17,36 +17,33 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
-import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-public class DropRepositoryStmt extends DdlStmt {
+public class DropRepositoryStmt extends DdlStmt implements NotFallbackInParser {
 
     private String repoName;
-    
+
     public DropRepositoryStmt(String repoName) {
         this.repoName = repoName;
     }
-    
+
     public String getRepoName() {
         return repoName;
     }
-    
+
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
         super.analyze(analyzer);
 
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
-
-        FeNameFormat.checkCommonName("repository", repoName);
     }
 
     @Override
@@ -55,5 +52,10 @@ public class DropRepositoryStmt extends DdlStmt {
         sb.append("DROP ");
         sb.append("REPOSITORY `").append(repoName).append("`");
         return sb.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

@@ -24,8 +24,7 @@ import org.apache.doris.common.FeConstants;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.Arrays;
 import java.util.List;
@@ -49,10 +48,8 @@ public class IndexSchemaProcNode implements ProcNodeInterface {
         this.bfColumns = bfColumns;
     }
 
-    @Override
-    public ProcResult fetchResult() throws AnalysisException {
+    public static ProcResult createResult(List<Column> schema, Set<String> bfColumns) throws AnalysisException {
         Preconditions.checkNotNull(schema);
-
         BaseProcResult result = new BaseProcResult();
         result.setNames(TITLE_NAMES);
 
@@ -60,15 +57,21 @@ public class IndexSchemaProcNode implements ProcNodeInterface {
             // Extra string (aggregation and bloom filter)
             List<String> extras = Lists.newArrayList();
             if (column.getAggregationType() != null) {
-                extras.add(column.getAggregationType().name());
+                extras.add(column.getAggregationString());
             }
             if (bfColumns != null && bfColumns.contains(column.getName())) {
                 extras.add("BLOOM_FILTER");
             }
+            if (column.isAutoInc()) {
+                extras.add("AUTO_INCREMENT");
+            }
+            if (column.getGeneratedColumnInfo() != null) {
+                extras.add("STORED GENERATED");
+            }
             String extraStr = StringUtils.join(extras, ",");
 
             List<String> rowList = Arrays.asList(column.getDisplayName(),
-                                                 column.getOriginType().toString(),
+                                                 column.getOriginType().hideVersionForVersionColumn(true),
                                                  column.isAllowNull() ? "Yes" : "No",
                                                  ((Boolean) column.isKey()).toString(),
                                                  column.getDefaultValue() == null
@@ -79,4 +82,8 @@ public class IndexSchemaProcNode implements ProcNodeInterface {
         return result;
     }
 
+    @Override
+    public ProcResult fetchResult() throws AnalysisException {
+        return createResult(this.schema, this.bfColumns);
+    }
 }

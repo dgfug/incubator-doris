@@ -17,12 +17,15 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.Env;
+import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.MockedAuth;
+import org.apache.doris.qe.ConnectContext;
+
 import com.google.common.collect.Lists;
 import mockit.Mock;
 import mockit.MockUp;
 import mockit.Mocked;
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.qe.ConnectContext;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -32,19 +35,21 @@ public class BackupTest {
 
     private Analyzer analyzer;
 
-    private Catalog catalog;
+    private Env env;
 
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
+        MockedAuth.mockedConnectContext(ctx, "root", "192.188.3.1");
+
         analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        catalog = AccessTestUtil.fetchAdminCatalog();
-        new MockUp<Catalog>() {
+        env = AccessTestUtil.fetchAdminCatalog();
+        new MockUp<Env>() {
             @Mock
-            public Catalog getCurrentCatalog() {
-                return catalog;
+            public Env getCurrentEnv() {
+                return env;
             }
         };
     }
@@ -53,10 +58,10 @@ public class BackupTest {
         BackupStmt stmt;
         List<TableRef> tblRefs = Lists.newArrayList();
         String testDB = "test_db";
-        tblRefs.add(new TableRef(new TableName(null, "table1"), null));
+        tblRefs.add(new TableRef(new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, null, "table1"), null));
         if (caseSensitive) {
             // case sensitive
-            tblRefs.add(new TableRef(new TableName(null, "Table1"), null));
+            tblRefs.add(new TableRef(new TableName(InternalCatalog.INTERNAL_CATALOG_NAME, null, "Table1"), null));
         }
         AbstractBackupTableRefClause tableRefClause = new AbstractBackupTableRefClause(false, tblRefs);
         stmt = new BackupStmt(new LabelName(testDB, "label1"), "repo",

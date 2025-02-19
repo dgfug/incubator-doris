@@ -17,26 +17,23 @@
 
 package org.apache.doris.load.loadv2;
 
-import org.apache.doris.analysis.LabelName;
-import org.apache.doris.analysis.LoadStmt;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeMetaVersion;
-import org.apache.doris.common.LabelAlreadyUsedException;
 import org.apache.doris.common.jmockit.Deencapsulation;
-import org.apache.doris.load.EtlJobType;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.meta.MetaContext;
 
+import mockit.Expectations;
+import mockit.Injectable;
+import mockit.Mocked;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -46,13 +43,10 @@ import java.io.FileOutputStream;
 import java.util.List;
 import java.util.Map;
 
-import mockit.Expectations;
-import mockit.Injectable;
-import mockit.Mocked;
-
 public class LoadManagerTest {
     private LoadManager loadManager;
     private final String fieldName = "idToLoadJob";
+    private UserIdentity userInfo = UserIdentity.createAnalyzedUserIdentWithIp("root", "localhost");
 
     @Before
     public void setUp() throws Exception {
@@ -68,55 +62,13 @@ public class LoadManagerTest {
     }
 
     @Test
-    public void testCreateHadoopJob(@Injectable LoadStmt stmt,
-                                    @Injectable LabelName labelName,
-                                    @Mocked Catalog catalog,
-                                    @Injectable Database database,
-                                    @Injectable BrokerLoadJob brokerLoadJob) {
-        Map<Long, Map<String, List<LoadJob>>> dbIdToLabelToLoadJobs = Maps.newHashMap();
-        Map<String, List<LoadJob>> labelToLoadJobs = Maps.newHashMap();
-        String label1 = "label1";
-        List<LoadJob> loadJobs = Lists.newArrayList();
-        loadJobs.add(brokerLoadJob);
-        labelToLoadJobs.put(label1, loadJobs);
-        dbIdToLabelToLoadJobs.put(1L, labelToLoadJobs);
-        LoadJobScheduler loadJobScheduler = new LoadJobScheduler();
-        loadManager = new LoadManager(loadJobScheduler);
-        Deencapsulation.setField(loadManager, "dbIdToLabelToLoadJobs", dbIdToLabelToLoadJobs);
+    public void testSerializationNormal(@Mocked Env env, @Mocked InternalCatalog catalog, @Injectable Database database,
+            @Injectable Table table) throws Exception {
         new Expectations() {
             {
-                stmt.getLabel();
+                env.getInternalCatalog();
                 minTimes = 0;
-                result = labelName;
-                labelName.getLabelName();
-                minTimes = 0;
-                result = "label1";
-                catalog.getDbNullable(anyString);
-                minTimes = 0;
-                result = database;
-                database.getId();
-                minTimes = 0;
-                result = 1L;
-            }
-        };
-
-        try {
-            loadManager.createLoadJobV1FromStmt(stmt, EtlJobType.HADOOP, System.currentTimeMillis());
-            Assert.fail("duplicated label is not be allowed");
-        } catch (LabelAlreadyUsedException e) {
-            // successful
-        } catch (DdlException e) {
-            Assert.fail(e.getMessage());
-        }
-
-    }
-
-    @Test
-    public void testSerializationNormal(@Mocked Catalog catalog,
-                                        @Injectable Database database,
-                                        @Injectable Table table) throws Exception {
-        new Expectations(){
-            {
+                result = catalog;
                 catalog.getDbNullable(anyLong);
                 minTimes = 0;
                 result = database;
@@ -126,18 +78,20 @@ public class LoadManagerTest {
                 table.getName();
                 minTimes = 0;
                 result = "tablename";
-                Catalog.getCurrentCatalogJournalVersion();
+                Env.getCurrentEnvJournalVersion();
                 minTimes = 0;
                 result = FeMetaVersion.VERSION_CURRENT;
             }
         };
 
         loadManager = new LoadManager(new LoadJobScheduler());
-        LoadJob job1 = new InsertLoadJob("job1", 1L, 1L, 1L, System.currentTimeMillis(), "", "");
+        LoadJob job1 = new InsertLoadJob("job1", 1L, 1L, 1L, System.currentTimeMillis(), "", "", userInfo);
         Deencapsulation.invoke(loadManager, "addLoadJob", job1);
 
         File file = serializeToFile(loadManager);
 
+        // make it deserialized
+        Config.streaming_label_keep_max_second = 10;
         LoadManager newLoadManager = deserializeFromFile(file);
 
         Map<Long, LoadJob> loadJobs = Deencapsulation.getField(loadManager, fieldName);
@@ -146,12 +100,13 @@ public class LoadManagerTest {
     }
 
     @Test
-    public void testSerializationWithJobRemoved(@Mocked MetaContext metaContext,
-                                                @Mocked Catalog catalog,
-                                                @Injectable Database database,
-                                                @Injectable Table table) throws Exception {
-        new Expectations(){
+    public void testSerializationWithJobRemoved(@Mocked MetaContext metaContext, @Mocked Env env,
+            @Mocked InternalCatalog catalog, @Injectable Database database, @Injectable Table table) throws Exception {
+        new Expectations() {
             {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
                 catalog.getDbNullable(anyLong);
                 minTimes = 0;
                 result = database;
@@ -161,17 +116,17 @@ public class LoadManagerTest {
                 table.getName();
                 minTimes = 0;
                 result = "tablename";
-                Catalog.getCurrentCatalogJournalVersion();
+                Env.getCurrentEnvJournalVersion();
                 minTimes = 0;
                 result = FeMetaVersion.VERSION_CURRENT;
             }
         };
 
         loadManager = new LoadManager(new LoadJobScheduler());
-        LoadJob job1 = new InsertLoadJob("job1", 1L, 1L, 1L, System.currentTimeMillis(), "", "");
+        LoadJob job1 = new InsertLoadJob("job1", 1L, 1L, 1L, System.currentTimeMillis(), "", "", userInfo);
         Deencapsulation.invoke(loadManager, "addLoadJob", job1);
 
-        //make job1 don't serialize
+        // make job1 don't serialize
         Config.streaming_label_keep_max_second = 1;
         Thread.sleep(2000);
 
@@ -181,6 +136,49 @@ public class LoadManagerTest {
         Map<Long, LoadJob> newLoadJobs = Deencapsulation.getField(newLoadManager, fieldName);
 
         Assert.assertEquals(0, newLoadJobs.size());
+    }
+
+    @Test
+    public void testCleanOverLimitJobs(@Mocked Env env,
+            @Mocked InternalCatalog catalog, @Injectable Database database, @Injectable Table table) throws Exception {
+        new Expectations() {
+            {
+                env.getNextId();
+                returns(1L, 2L);
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+                catalog.getDbNullable(anyLong);
+                minTimes = 0;
+                result = database;
+                database.getTableNullable(anyLong);
+                minTimes = 0;
+                result = table;
+                table.getName();
+                minTimes = 0;
+                result = "tablename";
+                Env.getCurrentEnvJournalVersion();
+                minTimes = 0;
+                result = FeMetaVersion.VERSION_CURRENT;
+            }
+        };
+
+        loadManager = new LoadManager(new LoadJobScheduler());
+        LoadJob job1 = new InsertLoadJob("job1", 1L, 1L, 1L, System.currentTimeMillis(), "", "", userInfo);
+        Thread.sleep(100);
+        LoadJob job2 = new InsertLoadJob("job2", 1L, 1L, 1L, System.currentTimeMillis(), "", "", userInfo);
+        Deencapsulation.invoke(loadManager, "addLoadJob", job2);
+        Deencapsulation.invoke(loadManager, "addLoadJob", job1);
+        Config.label_num_threshold = 1;
+        loadManager.removeOverLimitLoadJob();
+        Map<Long, LoadJob> idToJobs = Deencapsulation.getField(loadManager, fieldName);
+        Map<Long, Map<String, List<LoadJob>>> dbIdToLabelToLoadJobs = Deencapsulation.getField(loadManager,
+                "dbIdToLabelToLoadJobs");
+        Assert.assertEquals(1, idToJobs.size());
+        Assert.assertEquals(1, dbIdToLabelToLoadJobs.size());
+        LoadJob loadJob = idToJobs.get(job2.getId());
+        Assert.assertEquals("job2", loadJob.getLabel());
+        Assert.assertNotNull(dbIdToLabelToLoadJobs.get(1L).get("job2"));
     }
 
     private File serializeToFile(LoadManager loadManager) throws Exception {

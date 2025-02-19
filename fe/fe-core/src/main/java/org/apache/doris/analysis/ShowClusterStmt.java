@@ -18,24 +18,32 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.CompoundPredicate.Operator;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
-import org.apache.doris.mysql.privilege.PaloPrivilege;
 import org.apache.doris.mysql.privilege.PrivBitSet;
 import org.apache.doris.mysql.privilege.PrivPredicate;
+import org.apache.doris.mysql.privilege.Privilege;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.collect.ImmutableList;
 
-public class ShowClusterStmt extends ShowStmt {
-    public static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>().add("cluster").build();
+public class ShowClusterStmt extends ShowStmt implements NotFallbackInParser {
+    public static final ImmutableList<String> CLUSTER_TITLE_NAMES = new ImmutableList.Builder<String>()
+            .add("cluster").add("is_current").add("users").add("backend_num").build();
 
-    public ShowClusterStmt() {
+    public static final ImmutableList<String> COMPUTE_GROUP_TITLE_NAMES = new ImmutableList.Builder<String>()
+            .add("Name").add("IsCurrent").add("Users").add("BackendNum").build();
+
+    boolean isComputeGroup = true;
+
+    public ShowClusterStmt(boolean isComputeGroup) {
+        this.isComputeGroup = isComputeGroup;
     }
 
     @Override
@@ -43,10 +51,14 @@ public class ShowClusterStmt extends ShowStmt {
         ShowResultSetMetaData.Builder builder = ShowResultSetMetaData.builder();
 
         ImmutableList<String> titleNames = null;
-        titleNames = TITLE_NAMES;
+        if (isComputeGroup) {
+            titleNames = COMPUTE_GROUP_TITLE_NAMES;
+        } else {
+            titleNames = CLUSTER_TITLE_NAMES;
+        }
 
         for (String title : titleNames) {
-            builder.addColumn(new Column(title, ScalarType.createVarchar(30)));
+            builder.addColumn(new Column(title, ScalarType.createVarchar(128)));
         }
         return builder.build();
     }
@@ -58,17 +70,17 @@ public class ShowClusterStmt extends ShowStmt {
 
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException {
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(),
-                                                                   PrivPredicate.of(PrivBitSet.of(PaloPrivilege.ADMIN_PRIV,
-                                                                                                  PaloPrivilege.NODE_PRIV),
-                                                                                    Operator.OR))) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
+        if (Config.isNotCloudMode()) {
+            // just user admin
+            if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get().getCurrentUserIdentity(),
+                        PrivPredicate.of(PrivBitSet.of(Privilege.ADMIN_PRIV, Privilege.NODE_PRIV), Operator.OR))) {
+                ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
+            }
         }
     }
 
     @Override
     public String toSql() {
-        // TODO Auto-generated method stub
         return super.toSql();
     }
 

@@ -17,18 +17,18 @@
 
 package org.apache.doris.analysis;
 
-import com.google.common.base.Strings;
-import com.google.common.collect.ImmutableList;
 import org.apache.doris.analysis.BinaryPredicate.Operator;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.OrderByPair;
 import org.apache.doris.qe.ShowResultSetMetaData;
+
+import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableList;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -41,7 +41,7 @@ import java.util.List;
 //
 // syntax:
 //      SHOW STREAM LOAD [FROM db] [LIKE mask]
-public class ShowStreamLoadStmt extends ShowStmt {
+public class ShowStreamLoadStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowStreamLoadStmt.class);
 
     public enum StreamLoadState {
@@ -50,9 +50,9 @@ public class ShowStreamLoadStmt extends ShowStmt {
     }
 
     private String dbName;
-    private Expr whereClause;
-    private LimitElement limitElement;
-    private List<OrderByElement> orderByElements;
+    private final Expr whereClause;
+    private final LimitElement limitElement;
+    private final List<OrderByElement> orderByElements;
 
     private String labelValue;
     private String stateValue;
@@ -60,14 +60,15 @@ public class ShowStreamLoadStmt extends ShowStmt {
 
     private ArrayList<OrderByPair> orderByPairs;
 
-    private ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
-            .add("Label").add("Db").add("Table").add("User")
+    private static final ImmutableList<String> TITLE_NAMES = new ImmutableList.Builder<String>()
+            .add("Label").add("Db").add("Table")
             .add("ClientIp").add("Status").add("Message").add("Url").add("TotalRows")
             .add("LoadedRows").add("FilteredRows").add("UnselectedRows").add("LoadBytes")
-            .add("StartTime").add("FinishTime")
+            .add("StartTime").add("FinishTime").add("User").add("Comment")
             .build();
 
-    public ShowStreamLoadStmt(String db, Expr labelExpr, List<OrderByElement> orderByElements, LimitElement limitElement) {
+    public ShowStreamLoadStmt(String db, Expr labelExpr,
+            List<OrderByElement> orderByElements, LimitElement limitElement) {
         this.dbName = db;
         this.whereClause = labelExpr;
         this.orderByElements = orderByElements;
@@ -92,6 +93,7 @@ public class ShowStreamLoadStmt extends ShowStmt {
         try {
             index = analyzeColumn("FinishTime");
         } catch (AnalysisException e) {
+            // CHECKSTYLE IGNORE THIS LINE
         }
         OrderByPair orderByPair = new OrderByPair(index, false);
         orderByFinishTime.add(orderByPair);
@@ -125,6 +127,7 @@ public class ShowStreamLoadStmt extends ShowStmt {
         try {
             state = StreamLoadState.valueOf(stateValue);
         } catch (Exception e) {
+            // CHECKSTYLE IGNORE THIS LINE
         }
         return state;
     }
@@ -141,8 +144,6 @@ public class ShowStreamLoadStmt extends ShowStmt {
             if (Strings.isNullOrEmpty(dbName)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
 
         // analyze where clause if not null

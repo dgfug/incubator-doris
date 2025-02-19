@@ -17,42 +17,45 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <string>
+
 #include "common/status.h"
-#include "gen_cpp/PlanNodes_types.h"
 
 namespace doris {
 
-class Status;
-class RowBatch;
-class RuntimeState;
-class TypeDescriptor;
-
 namespace vectorized {
-    class Block;
+class Block;
 }
+class RuntimeState;
 
 // abstract class of the result writer
 class ResultWriter {
 public:
-    ResultWriter() {};
-    ~ResultWriter(){};
+    ResultWriter() = default;
+    virtual ~ResultWriter() = default;
 
     virtual Status init(RuntimeState* state) = 0;
-    // convert and write one row batch
-    virtual Status append_row_batch(const RowBatch* batch) = 0;
 
-    // virtual Status append_block(const vectorized::Block& block) {
-    //     return Status::InternalError("Not support append vec block now.");
-    // }
+    virtual Status finish(RuntimeState* state) { return Status::OK(); }
 
-    virtual Status close() = 0;
+    virtual Status close(Status s = Status::OK()) = 0;
 
-    virtual int64_t get_written_rows() const { return _written_rows; }
+    [[nodiscard]] virtual int64_t get_written_rows() const { return _written_rows; }
 
-    static const std::string NULL_IN_CSV;
+    [[nodiscard]] bool output_object_data() const { return _output_object_data; }
+
+    // Write is sync, it will do real IO work.
+    virtual Status write(RuntimeState* state, vectorized::Block& block) = 0;
+
+    void set_output_object_data(bool output_object_data) {
+        _output_object_data = output_object_data;
+    }
 
 protected:
     int64_t _written_rows = 0; // number of rows written
+    bool _output_object_data = false;
 };
 
 } // namespace doris

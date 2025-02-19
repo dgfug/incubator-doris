@@ -17,47 +17,51 @@
 
 package org.apache.doris.catalog;
 
-import org.apache.doris.catalog.Table.TableType;
+import org.apache.doris.analysis.FunctionName;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.ErrorCode;
-import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.lock.MonitoredReentrantReadWriteLock;
 import org.apache.doris.common.util.DebugUtil;
+import org.apache.doris.common.util.PropertyAnalyzer;
+import org.apache.doris.common.util.Util;
+import org.apache.doris.datasource.CatalogIf;
 import org.apache.doris.persist.CreateTableInfo;
-import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.persist.gson.GsonPostProcessable;
+import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import com.google.gson.annotations.SerializedName;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import javax.annotation.Nullable;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
 /**
@@ -73,37 +77,56 @@ import java.util.stream.Collectors;
  * if the table has never been loaded * if the table loading failed on the
  * previous attempt
  */
-public class Database extends MetaObject implements Writable {
+public class Database extends MetaObject implements Writable, DatabaseIf<Table>, GsonPostProcessable {
     private static final Logger LOG = LogManager.getLogger(Database.class);
 
+    private static final String TRANSACTION_QUOTA_SIZE = "transactionQuotaSize";
+
+    @SerializedName(value = "id")
     private long id;
+    @SerializedName(value = "fullQualifiedName")
     private volatile String fullQualifiedName;
-    private String clusterName;
-    private ReentrantReadWriteLock rwLock;
+
+    private MonitoredReentrantReadWriteLock rwLock;
 
     // table family group map
-    private Map<Long, Table> idToTable;
-    private Map<String, Table> nameToTable;
-    // table name lower cast -> table name
-    private Map<String, String> lowerCaseToTableName;
+    private final Map<Long, Table> idToTable;
+    private ConcurrentMap<String, Table> nameToTable;
+    // table name lower case -> table name
+    private final ConcurrentMap<String, String> lowerCaseToTableName;
 
     // user define function
+    @SerializedName(value = "name2Function")
     private ConcurrentMap<String, ImmutableList<Function>> name2Function = Maps.newConcurrentMap();
     // user define encryptKey for current db
+    @SerializedName(value = "dbEncryptKey")
     private DatabaseEncryptKey dbEncryptKey;
 
+    @SerializedName(value = "dataQuotaBytes")
     private volatile long dataQuotaBytes;
 
+    @SerializedName(value = "replicaQuotaSize")
     private volatile long replicaQuotaSize;
+
+    // from dbProperties;
+    private volatile long transactionQuotaSize;
+
+    private volatile boolean isDropped;
 
     public enum DbState {
         NORMAL, LINK, MOVE
     }
 
+    @SerializedName(value = "attachDbName")
     private String attachDbName;
+    @SerializedName(value = "dbState")
     private DbState dbState;
 
+    @SerializedName(value = "dbProperties")
     private DatabaseProperty dbProperties = new DatabaseProperty();
+
+    // from dbProperties;
+    private BinlogConfig binlogConfig = new BinlogConfig();
 
     public Database() {
         this(0, null);
@@ -115,16 +138,26 @@ public class Database extends MetaObject implements Writable {
         if (this.fullQualifiedName == null) {
             this.fullQualifiedName = "";
         }
-        this.rwLock = new ReentrantReadWriteLock(true);
+        this.rwLock = new MonitoredReentrantReadWriteLock(true);
         this.idToTable = Maps.newConcurrentMap();
         this.nameToTable = Maps.newConcurrentMap();
         this.lowerCaseToTableName = Maps.newConcurrentMap();
         this.dataQuotaBytes = Config.default_db_data_quota_bytes;
-        this.replicaQuotaSize = FeConstants.default_db_replica_quota_size;
+        this.replicaQuotaSize = Config.default_db_replica_quota_size;
+        this.transactionQuotaSize = Config.default_db_max_running_txn_num == -1L
+                ? Config.max_running_txn_num_per_db
+                : Config.default_db_max_running_txn_num;
         this.dbState = DbState.NORMAL;
         this.attachDbName = "";
-        this.clusterName = "";
         this.dbEncryptKey = new DatabaseEncryptKey();
+    }
+
+    public void markDropped() {
+        isDropped = true;
+    }
+
+    public void unmarkDropped() {
+        isDropped = false;
     }
 
     public void readLock() {
@@ -145,7 +178,14 @@ public class Database extends MetaObject implements Writable {
 
     public boolean tryWriteLock(long timeout, TimeUnit unit) {
         try {
-            return this.rwLock.writeLock().tryLock(timeout, unit);
+            if (!this.rwLock.writeLock().tryLock(timeout, unit)) {
+                Thread owner = this.rwLock.getOwner();
+                if (owner != null) {
+                    LOG.info("database[{}] lock is held by: {}", getName(), Util.dumpThread(owner, 10));
+                }
+                return false;
+            }
+            return true;
         } catch (InterruptedException e) {
             LOG.warn("failed to try write lock at db[" + id + "]", e);
             return false;
@@ -156,6 +196,26 @@ public class Database extends MetaObject implements Writable {
         return this.rwLock.writeLock().isHeldByCurrentThread();
     }
 
+    public boolean writeLockIfExist() {
+        if (!isDropped) {
+            this.rwLock.writeLock().lock();
+            return true;
+        }
+        return false;
+    }
+
+    public <E extends Exception> void writeLockOrException(E e) throws E {
+        writeLock();
+        if (isDropped) {
+            writeUnlock();
+            throw e;
+        }
+    }
+
+    public void writeLockOrDdlException() throws DdlException {
+        writeLockOrException(new DdlException("unknown db, dbName=" + fullQualifiedName));
+    }
+
     public long getId() {
         return id;
     }
@@ -164,32 +224,48 @@ public class Database extends MetaObject implements Writable {
         return fullQualifiedName;
     }
 
+    public String getName() {
+        String[] strs = fullQualifiedName.split(":");
+        return strs.length == 2 ? strs[1] : strs[0];
+    }
+
     public void setNameWithLock(String newName) {
         writeLock();
         try {
-            this.fullQualifiedName = newName;
+            // ClusterNamespace.getNameFromFullName should be removed in 3.0
+            this.fullQualifiedName = ClusterNamespace.getNameFromFullName(newName);
+            for (Table table : idToTable.values()) {
+                table.setQualifiedDbName(fullQualifiedName);
+            }
         } finally {
             writeUnlock();
         }
     }
 
-    public void setDataQuotaWithLock(long newQuota) {
+    public void setDataQuota(long newQuota) {
         Preconditions.checkArgument(newQuota >= 0L);
         LOG.info("database[{}] set quota from {} to {}", fullQualifiedName, dataQuotaBytes, newQuota);
-        writeLock();
-        try {
-            this.dataQuotaBytes = newQuota;
-        } finally {
-            writeUnlock();
-        }
+        this.dataQuotaBytes = newQuota;
     }
 
-    public void setReplicaQuotaWithLock(long newQuota) {
+    public void setReplicaQuota(long newQuota) {
         Preconditions.checkArgument(newQuota >= 0L);
         LOG.info("database[{}] set replica quota from {} to {}", fullQualifiedName, replicaQuotaSize, newQuota);
+        this.replicaQuotaSize = newQuota;
+    }
+
+    public DbState getDbState() {
+        return dbState;
+    }
+
+    public void setTransactionQuotaSize(long newQuota) {
         writeLock();
         try {
-            this.replicaQuotaSize = newQuota;
+            Preconditions.checkArgument(newQuota >= 0L);
+            LOG.info("database[{}] try to set transaction quota from {} to {}",
+                    fullQualifiedName, transactionQuotaSize, newQuota);
+            this.transactionQuotaSize = newQuota;
+            this.dbProperties.put(TRANSACTION_QUOTA_SIZE, String.valueOf(transactionQuotaSize));
         } finally {
             writeUnlock();
         }
@@ -203,53 +279,70 @@ public class Database extends MetaObject implements Writable {
         return replicaQuotaSize;
     }
 
+    public long getTransactionQuotaSize() {
+        return transactionQuotaSize;
+    }
+
+    public DatabaseProperty getDbProperties() {
+        return dbProperties;
+    }
+
+    public void setDbProperties(DatabaseProperty dbProperties) {
+        this.dbProperties = dbProperties;
+        if (PropertyAnalyzer.hasBinlogConfig(dbProperties.getProperties())) {
+            binlogConfig = dbProperties.getBinlogConfig();
+        }
+    }
+
     public long getUsedDataQuotaWithLock() {
-        long usedDataQuota = 0;
+        return getUsedDataSize().first;
+    }
+
+    public Pair<Long, Long> getUsedDataSize() {
+        long usedDataSize = 0;
+        long usedRemoteDataSize = 0;
+        List<Table> tables = new ArrayList<>();
         readLock();
         try {
+            tables.addAll(this.idToTable.values());
+        } finally {
+            readUnlock();
+        }
+
+        for (Table table : tables) {
+            if (!table.isManagedTable()) {
+                continue;
+            }
+
+            OlapTable olapTable = (OlapTable) table;
+            usedDataSize = usedDataSize + olapTable.getDataSize();
+            usedRemoteDataSize = usedRemoteDataSize + olapTable.getRemoteDataSize();
+
+        }
+        return Pair.of(usedDataSize, usedRemoteDataSize);
+    }
+
+    public long getReplicaCount() {
+        readLock();
+        try {
+            long usedReplicaCount = 0;
             for (Table table : this.idToTable.values()) {
-                if (table.getType() != TableType.OLAP) {
+                if (!table.isManagedTable()) {
                     continue;
                 }
 
                 OlapTable olapTable = (OlapTable) table;
-                olapTable.readLock();
-                try {
-                    usedDataQuota = usedDataQuota + olapTable.getDataSize();
-                } finally {
-                    olapTable.readUnlock();
-                }
+                usedReplicaCount = usedReplicaCount + olapTable.getReplicaCount();
             }
-            return usedDataQuota;
+            return usedReplicaCount;
         } finally {
             readUnlock();
         }
     }
 
-
     public long getReplicaQuotaLeftWithLock() {
-        long usedReplicaQuota = 0;
-        readLock();
-        try {
-            for (Table table : this.idToTable.values()) {
-                if (table.getType() != TableType.OLAP) {
-                    continue;
-                }
-
-                OlapTable olapTable = (OlapTable) table;
-                olapTable.readLock();
-                try {
-                    usedReplicaQuota = usedReplicaQuota + olapTable.getReplicaCount();
-                } finally {
-                    olapTable.readUnlock();
-                }
-            }
-
-            long leftReplicaQuota = replicaQuotaSize - usedReplicaQuota;
-            return Math.max(leftReplicaQuota, 0L);
-        } finally {
-            readUnlock();
-        }
+        long leftReplicaQuota = replicaQuotaSize - getReplicaCount();
+        return Math.max(leftReplicaQuota, 0L);
     }
 
     public void checkDataSizeQuota() throws DdlException {
@@ -288,8 +381,8 @@ public class Database extends MetaObject implements Writable {
         checkReplicaQuota();
     }
 
-    private boolean isTableExist(String tableName) {
-        if (Catalog.isTableNamesCaseInsensitive()) {
+    public boolean isTableExist(String tableName) {
+        if (Env.isTableNamesCaseInsensitive()) {
             tableName = lowerCaseToTableName.get(tableName.toLowerCase());
             if (tableName == null) {
                 return false;
@@ -299,15 +392,17 @@ public class Database extends MetaObject implements Writable {
     }
 
     // return pair <success?, table exist?>
-    public Pair<Boolean, Boolean> createTableWithLock(Table table, boolean isReplay, boolean setIfNotExist) {
+    public Pair<Boolean, Boolean> createTableWithLock(
+            Table table, boolean isReplay, boolean setIfNotExist) throws DdlException {
         boolean result = true;
         // if a table is already exists, then edit log won't be executed
         // some caller of this method may need to know this message
         boolean isTableExist = false;
-        writeLock();
+        table.setQualifiedDbName(fullQualifiedName);
+        writeLockOrDdlException();
         try {
             String tableName = table.getName();
-            if (Catalog.isStoredTableNamesLowerCase()) {
+            if (Env.isStoredTableNamesLowerCase()) {
                 tableName = tableName.toLowerCase();
             }
             if (isTableExist(tableName)) {
@@ -321,45 +416,42 @@ public class Database extends MetaObject implements Writable {
                 if (!isReplay) {
                     // Write edit log
                     CreateTableInfo info = new CreateTableInfo(fullQualifiedName, table);
-                    Catalog.getCurrentCatalog().getEditLog().logCreateTable(info);
+                    Env.getCurrentEnv().getEditLog().logCreateTable(info);
                 }
                 if (table.getType() == TableType.ELASTICSEARCH) {
-                    Catalog.getCurrentCatalog().getEsRepository().registerTable((EsTable) table);
+                    Env.getCurrentEnv().getEsRepository().registerTable((EsTable) table);
+                } else if (table.getType() == TableType.MATERIALIZED_VIEW) {
+                    Env.getCurrentEnv().getMtmvService().registerMTMV((MTMV) table, id);
                 }
             }
-            return Pair.create(result, isTableExist);
+            return Pair.of(result, isTableExist);
         } finally {
             writeUnlock();
         }
     }
 
-    public boolean createTable(Table table) {
+    @Override
+    public boolean registerTable(TableIf table) {
         boolean result = true;
-        String tableName = table.getName();
-        if (Catalog.isStoredTableNamesLowerCase()) {
+        Table olapTable = (Table) table;
+        olapTable.setQualifiedDbName(fullQualifiedName);
+        String tableName = olapTable.getName();
+        if (Env.isStoredTableNamesLowerCase()) {
             tableName = tableName.toLowerCase();
         }
         if (isTableExist(tableName)) {
             result = false;
         } else {
-            idToTable.put(table.getId(), table);
-            nameToTable.put(table.getName(), table);
+            idToTable.put(olapTable.getId(), olapTable);
+            nameToTable.put(olapTable.getName(), olapTable);
             lowerCaseToTableName.put(tableName.toLowerCase(), tableName);
         }
+        olapTable.unmarkDropped();
         return result;
     }
 
-    public void dropTableWithLock(String tableName) {
-        writeLock();
-        try {
-            dropTable(tableName);
-        } finally {
-            writeUnlock();
-        }
-    }
-
-    public void dropTable(String tableName) {
-        if (Catalog.isStoredTableNamesLowerCase()) {
+    public void unregisterTable(String tableName) {
+        if (Env.isStoredTableNamesLowerCase()) {
             tableName = tableName.toLowerCase();
         }
         Table table = getTableNullable(tableName);
@@ -367,11 +459,25 @@ public class Database extends MetaObject implements Writable {
             this.nameToTable.remove(tableName);
             this.idToTable.remove(table.getId());
             this.lowerCaseToTableName.remove(tableName.toLowerCase());
+            table.markDropped();
         }
+    }
+
+    @Override
+    public CatalogIf getCatalog() {
+        return Env.getCurrentInternalCatalog();
     }
 
     public List<Table> getTables() {
         return new ArrayList<>(idToTable.values());
+    }
+
+    public Map<Long, Table> getIdToTableRef() {
+        return idToTable;
+    }
+
+    public List<Long> getTableIds() {
+        return new ArrayList<>(idToTable.keySet());
     }
 
     // tables must get read or write table in fixed order to avoid potential dead lock
@@ -391,12 +497,42 @@ public class Database extends MetaObject implements Writable {
         return views;
     }
 
+    public List<Table> getViewsOnIdOrder() {
+        List<Table> tables = idToTable.values().stream()
+                .sorted(Comparator.comparing(Table::getId))
+                .collect(Collectors.toList());
+        List<Table> views = new ArrayList<>();
+        for (Table table : tables) {
+            if (table.getType() == TableType.VIEW) {
+                views.add(table);
+            }
+        }
+        return views;
+    }
+
+    /**
+     * this method is used for get existed table list by table id list, if table not exist, just ignore it.
+     */
+    public List<Table> getTablesOnIdOrderIfExist(List<Long> tableIdList) {
+        List<Table> tableList = Lists.newArrayListWithCapacity(tableIdList.size());
+        for (Long tableId : tableIdList) {
+            Table table = idToTable.get(tableId);
+            if (table != null) {
+                tableList.add(table);
+            }
+        }
+        if (tableList.size() > 1) {
+            return tableList.stream().sorted(Comparator.comparing(Table::getId)).collect(Collectors.toList());
+        }
+        return tableList;
+    }
+
     public List<Table> getTablesOnIdOrderOrThrowException(List<Long> tableIdList) throws MetaNotFoundException {
-        List<Table> tableList = Lists.newArrayList();
+        List<Table> tableList = Lists.newArrayListWithCapacity(tableIdList.size());
         for (Long tableId : tableIdList) {
             Table table = idToTable.get(tableId);
             if (table == null) {
-                throw new MetaNotFoundException("unknown table, tableId=" + tableId);
+                throw new MetaNotFoundException("table not found, tableId=" + tableId);
             }
             tableList.add(table);
         }
@@ -415,15 +551,19 @@ public class Database extends MetaObject implements Writable {
         }
     }
 
+    public Set<String> getTableNames() {
+        return new HashSet<>(this.nameToTable.keySet());
+    }
+
     /**
      * This is a thread-safe method when nameToTable is a concurrent hash map
      */
-    @Nullable
+    @Override
     public Table getTableNullable(String tableName) {
-        if (Catalog.isStoredTableNamesLowerCase()) {
+        if (Env.isStoredTableNamesLowerCase()) {
             tableName = tableName.toLowerCase();
         }
-        if (Catalog.isTableNamesCaseInsensitive()) {
+        if (Env.isTableNamesCaseInsensitive()) {
             tableName = lowerCaseToTableName.get(tableName.toLowerCase());
             if (tableName == null) {
                 return null;
@@ -435,90 +575,9 @@ public class Database extends MetaObject implements Writable {
     /**
      * This is a thread-safe method when idToTable is a concurrent hash map
      */
-    @Nullable
+    @Override
     public Table getTableNullable(long tableId) {
         return idToTable.get(tableId);
-    }
-
-    public Optional<Table> getTable(String tableName) {
-        return Optional.ofNullable(getTableNullable(tableName));
-    }
-
-    public Optional<Table> getTable(long tableId) {
-        return Optional.ofNullable(getTableNullable(tableId));
-    }
-
-    public <E extends Exception> Table getTableOrException(String tableName, java.util.function.Function<String, E> e) throws E {
-        Table table = getTableNullable(tableName);
-        if (table == null) {
-            throw e.apply(tableName);
-        }
-        return table;
-    }
-
-    public <E extends Exception> Table getTableOrException(long tableId, java.util.function.Function<Long, E> e) throws E {
-        Table table = getTableNullable(tableId);
-        if (table == null) {
-            throw e.apply(tableId);
-        }
-        return table;
-    }
-
-    public Table getTableOrMetaException(String tableName) throws MetaNotFoundException {
-        return getTableOrException(tableName, t -> new MetaNotFoundException("unknown table, tableName=" + t));
-    }
-
-    public Table getTableOrMetaException(long tableId) throws MetaNotFoundException {
-        return getTableOrException(tableId, t -> new MetaNotFoundException("unknown table, tableId=" + t));
-    }
-    @SuppressWarnings("unchecked")
-    public <T extends Table> T getTableOrMetaException(String tableName, TableType tableType) throws MetaNotFoundException {
-        Table table = getTableOrMetaException(tableName);
-        if (table.getType() != tableType) {
-            throw new MetaNotFoundException("table type is not " + tableType + ", tableName=" + tableName + ", type=" + table.getType());
-        }
-        return (T) table;
-    }
-
-    @SuppressWarnings("unchecked")
-    public <T extends Table> T getTableOrMetaException(long tableId, TableType tableType) throws MetaNotFoundException {
-        Table table = getTableOrMetaException(tableId);
-        if (table.getType() != tableType) {
-            throw new MetaNotFoundException("table type is not " + tableType + ", tableId=" + tableId + ", type=" + table.getType());
-        }
-        return (T) table;
-    }
-
-    public Table getTableOrDdlException(String tableName) throws DdlException {
-        return getTableOrException(tableName, t -> new DdlException(ErrorCode.ERR_BAD_TABLE_ERROR.formatErrorMsg(t)));
-    }
-
-    public OlapTable getOlapTableOrDdlException(String tableName) throws DdlException {
-        Table table = getTableOrDdlException(tableName);
-        if (!(table instanceof OlapTable)) {
-            throw new DdlException(ErrorCode.ERR_NOT_OLAP_TABLE.formatErrorMsg(tableName));
-        }
-        return (OlapTable) table;
-    }
-
-    public Table getTableOrDdlException(long tableId) throws DdlException {
-        return getTableOrException(tableId, t -> new DdlException(ErrorCode.ERR_BAD_TABLE_ERROR.formatErrorMsg(t)));
-    }
-
-    public Table getTableOrAnalysisException(String tableName) throws AnalysisException {
-        return getTableOrException(tableName, t -> new AnalysisException(ErrorCode.ERR_BAD_TABLE_ERROR.formatErrorMsg(t)));
-    }
-
-    public OlapTable getOlapTableOrAnalysisException(String tableName) throws AnalysisException {
-        Table table = getTableOrAnalysisException(tableName);
-        if (!(table instanceof OlapTable)) {
-            throw new AnalysisException(ErrorCode.ERR_NOT_OLAP_TABLE.formatErrorMsg(tableName));
-        }
-        return (OlapTable) table;
-    }
-
-    public Table getTableOrAnalysisException(long tableId) throws AnalysisException {
-        return getTableOrException(tableId, t -> new AnalysisException(ErrorCode.ERR_BAD_TABLE_ERROR.formatErrorMsg(t)));
     }
 
     public int getMaxReplicationNum() {
@@ -526,14 +585,15 @@ public class Database extends MetaObject implements Writable {
         readLock();
         try {
             for (Table table : idToTable.values()) {
-                if (table.getType() != TableType.OLAP) {
+                if (!table.isManagedTable()) {
                     continue;
                 }
                 OlapTable olapTable = (OlapTable) table;
                 table.readLock();
                 try {
                     for (Partition partition : olapTable.getAllPartitions()) {
-                        short replicationNum = olapTable.getPartitionInfo().getReplicaAllocation(partition.getId()).getTotalReplicaNum();
+                        short replicationNum = olapTable.getPartitionInfo()
+                                .getReplicaAllocation(partition.getId()).getTotalReplicaNum();
                         if (ret < replicationNum) {
                             ret = replicationNum;
                         }
@@ -549,9 +609,76 @@ public class Database extends MetaObject implements Writable {
     }
 
     public static Database read(DataInput in) throws IOException {
-        Database db = new Database();
-        db.readFields(in);
-        return db;
+        LOG.info("read db from journal {}", in);
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_136) {
+            Database db = new Database();
+            db.readFields(in);
+            return db;
+        } else if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_138) {
+            return GsonUtils.GSON.fromJson(Text.readString(in), Database.class);
+        } else {
+            Database db = GsonUtils.GSON.fromJson(Text.readString(in), Database.class);
+            db.readTables(in);
+            return db;
+        }
+    }
+
+    private void writeTables(DataOutput out) throws IOException {
+        out.writeInt(nameToTable.size());
+        for (Table table : nameToTable.values()) {
+            Text.writeString(out, GsonUtils.GSON.toJson(table));
+        }
+    }
+
+    private void readTables(DataInput in) throws IOException {
+        nameToTable = Maps.newConcurrentMap();
+        int numTables = in.readInt();
+        for (int i = 0; i < numTables; ++i) {
+            Table table = Table.read(in);
+            table.setQualifiedDbName(fullQualifiedName);
+            if (table instanceof MTMV) {
+                Env.getCurrentEnv().getMtmvService().registerMTMV((MTMV) table, id);
+            }
+            String tableName = table.getName();
+            nameToTable.put(tableName, table);
+            idToTable.put(table.getId(), table);
+            lowerCaseToTableName.put(tableName.toLowerCase(), tableName);
+        }
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        Preconditions.checkState(nameToTable.getClass() == ConcurrentHashMap.class,
+                                 "nameToTable should be ConcurrentMap");
+        nameToTable.forEach((tn, tb) -> {
+            tb.setQualifiedDbName(fullQualifiedName);
+            if (tb instanceof MTMV) {
+                Env.getCurrentEnv().getMtmvService().registerMTMV((MTMV) tb, id);
+            }
+            idToTable.put(tb.getId(), tb);
+            lowerCaseToTableName.put(tn.toLowerCase(), tn);
+        });
+
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_105) {
+            String txnQuotaStr = dbProperties.getOrDefault(TRANSACTION_QUOTA_SIZE,
+                    String.valueOf(Config.max_running_txn_num_per_db));
+            transactionQuotaSize = Long.parseLong(txnQuotaStr);
+            binlogConfig = dbProperties.getBinlogConfig();
+        } else {
+            transactionQuotaSize = Config.default_db_max_running_txn_num == -1L
+                    ? Config.max_running_txn_num_per_db
+                    : Config.default_db_max_running_txn_num;
+        }
+
+        for (ImmutableList<Function> functions : name2Function.values()) {
+            for (Function function : functions) {
+                try {
+                    FunctionUtil.translateToNereids(this.getFullName(), function);
+                } catch (Exception e) {
+                    LOG.warn("Nereids add function failed", e);
+                }
+            }
+        }
     }
 
     @Override
@@ -559,59 +686,54 @@ public class Database extends MetaObject implements Writable {
         StringBuilder sb = new StringBuilder(signatureVersion);
         sb.append(fullQualifiedName);
         String md5 = DigestUtils.md5Hex(sb.toString());
-        LOG.debug("get signature of database {}: {}. signature string: {}", fullQualifiedName, md5, sb.toString());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("get signature of database {}: {}. signature string: {}", fullQualifiedName, md5, sb.toString());
+        }
         return md5;
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
-        super.write(out);
-
-        out.writeLong(id);
-        Text.writeString(out, fullQualifiedName);
-        // write tables
-        int numTables = nameToTable.size();
-        out.writeInt(numTables);
-        for (Map.Entry<String, Table> entry : nameToTable.entrySet()) {
-            entry.getValue().write(out);
-        }
-
-        out.writeLong(dataQuotaBytes);
-        Text.writeString(out, clusterName);
-        Text.writeString(out, dbState.name());
-        Text.writeString(out, attachDbName);
-
-        // write functions
-        out.writeInt(name2Function.size());
-        for (Entry<String, ImmutableList<Function>> entry : name2Function.entrySet()) {
-            Text.writeString(out, entry.getKey());
-            out.writeInt(entry.getValue().size());
-            for (Function function : entry.getValue()) {
-                function.write(out);
-            }
-        }
-
-        // write encryptKeys
-        dbEncryptKey.write(out);
-
-        out.writeLong(replicaQuotaSize);
-        dbProperties.write(out);
+        discardHudiTable();
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
+        writeTables(out);
     }
 
+
+    private void discardHudiTable() {
+        Iterator<Entry<String, Table>> iterator = nameToTable.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, Table> entry = iterator.next();
+            if (entry.getValue().getType() == TableType.HUDI) {
+                LOG.warn("hudi table is deprecated, discard it. table name: {}", entry.getKey());
+                iterator.remove();
+                idToTable.remove(entry.getValue().getId());
+            }
+        }
+    }
+
+    public void analyze() {
+        for (Table table : nameToTable.values()) {
+            table.analyze(getFullName());
+        }
+    }
+
+    @Deprecated
     @Override
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
 
         id = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_30) {
-            fullQualifiedName = ClusterNamespace.getFullName(SystemInfoService.DEFAULT_CLUSTER, Text.readString(in));
-        } else {
-            fullQualifiedName = Text.readString(in);
-        }
+        fullQualifiedName = Text.readString(in);
+        fullQualifiedName = ClusterNamespace.getNameFromFullName(fullQualifiedName);
         // read groups
         int numTables = in.readInt();
         for (int i = 0; i < numTables; ++i) {
             Table table = Table.read(in);
+            table.setQualifiedDbName(fullQualifiedName);
+            if (table instanceof MTMV) {
+                Env.getCurrentEnv().getMtmvService().registerMTMV((MTMV) table, id);
+            }
             String tableName = table.getName();
             nameToTable.put(tableName, table);
             idToTable.put(table.getId(), table);
@@ -620,42 +742,36 @@ public class Database extends MetaObject implements Writable {
 
         // read quota
         dataQuotaBytes = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_30) {
-            clusterName = SystemInfoService.DEFAULT_CLUSTER;
-        } else {
-            clusterName = Text.readString(in);
-            dbState = DbState.valueOf(Text.readString(in));
-            attachDbName = Text.readString(in);
-        }
+        // cluster
+        Text.readString(in);
+        dbState = DbState.valueOf(Text.readString(in));
+        attachDbName = Text.readString(in);
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_47) {
-            int numEntries = in.readInt();
-            for (int i = 0; i < numEntries; ++i) {
-                String name = Text.readString(in);
-                ImmutableList.Builder<Function> builder = ImmutableList.builder();
-                int numFunctions = in.readInt();
-                for (int j = 0; j < numFunctions; ++j) {
-                    builder.add(Function.read(in));
-                }
-
-                name2Function.put(name, builder.build());
-            }
-        }
+        FunctionUtil.readFields(in, this.getFullName(), name2Function);
 
         // read encryptKeys
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_102) {
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_102) {
             dbEncryptKey = DatabaseEncryptKey.read(in);
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_81) {
-            replicaQuotaSize = in.readLong();
-        } else {
-            replicaQuotaSize = FeConstants.default_db_replica_quota_size;
-        }
+        replicaQuotaSize = in.readLong();
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_105) {
+        if (Env.getCurrentEnvJournalVersion() >= FeMetaVersion.VERSION_105) {
             dbProperties = DatabaseProperty.read(in);
+            String txnQuotaStr = dbProperties.getOrDefault(TRANSACTION_QUOTA_SIZE,
+                    String.valueOf(Config.max_running_txn_num_per_db));
+            transactionQuotaSize = Long.parseLong(txnQuotaStr);
+            binlogConfig = dbProperties.getBinlogConfig();
+        } else {
+            transactionQuotaSize = Config.default_db_max_running_txn_num == -1L
+                    ? Config.max_running_txn_num_per_db
+                    : Config.default_db_max_running_txn_num;
         }
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, fullQualifiedName, dataQuotaBytes);
     }
 
     @Override
@@ -667,215 +783,157 @@ public class Database extends MetaObject implements Writable {
             return false;
         }
 
-        Database database = (Database) obj;
+        Database other = (Database) obj;
 
-        if (idToTable != database.idToTable) {
-            if (idToTable.size() != database.idToTable.size()) {
-                return false;
-            }
-            for (Entry<Long, Table> entry : idToTable.entrySet()) {
-                long key = entry.getKey();
-                if (!database.idToTable.containsKey(key)) {
-                    return false;
-                }
-                if (!entry.getValue().equals(database.idToTable.get(key))) {
-                    return false;
-                }
-            }
-        }
-
-        return (id == database.id) && (fullQualifiedName.equals(database.fullQualifiedName)
-                && dataQuotaBytes == database.dataQuotaBytes);
-    }
-
-    public String getClusterName() {
-        return clusterName;
-    }
-
-    public void setClusterName(String clusterName) {
-        this.clusterName = clusterName;
-    }
-
-    public DbState getDbState() {
-        return dbState;
-    }
-
-    public void setDbState(DbState dbState) {
-        if (dbState == null) {
-            return;
-        }
-        this.dbState = dbState;
-    }
-
-    public void setAttachDb(String name) {
-        this.attachDbName = name;
-    }
-
-    public String getAttachDb() {
-        return this.attachDbName;
+        return id == other.id
+                && idToTable.equals(other.idToTable)
+                && fullQualifiedName.equals(other.fullQualifiedName)
+                && dataQuotaBytes == other.dataQuotaBytes;
     }
 
     public void setName(String name) {
         this.fullQualifiedName = name;
+        for (Table table : nameToTable.values()) {
+            table.setQualifiedDbName(name);
+        }
     }
 
-    public synchronized void addFunction(Function function) throws UserException {
-        addFunctionImpl(function, false);
-        Catalog.getCurrentCatalog().getEditLog().logAddFunction(function);
+    public synchronized void addFunction(Function function, boolean ifNotExists) throws UserException {
+        function.checkWritable();
+        if (FunctionUtil.addFunctionImpl(function, ifNotExists, false, name2Function)) {
+            Env.getCurrentEnv().getEditLog().logAddFunction(function);
+            FunctionUtil.translateToNereids(this.getFullName(), function);
+        }
     }
 
     public synchronized void replayAddFunction(Function function) {
         try {
-            addFunctionImpl(function, true);
+            FunctionUtil.addFunctionImpl(function, false, true, name2Function);
+            FunctionUtil.translateToNereids(this.getFullName(), function);
         } catch (UserException e) {
-            Preconditions.checkArgument(false);
+            throw new RuntimeException(e);
         }
     }
 
-    // return true if add success, false
-    private void addFunctionImpl(Function function, boolean isReplay) throws UserException {
-        String functionName = function.getFunctionName().getFunction();
-        List<Function> existFuncs = name2Function.get(functionName);
-        if (!isReplay) {
-            if (existFuncs != null) {
-                for (Function existFunc : existFuncs) {
-                    if (function.compare(existFunc, Function.CompareMode.IS_IDENTICAL)) {
-                        throw new UserException("function already exists");
-                    }
-                }
+    public synchronized void dropFunction(FunctionSearchDesc function, boolean ifExists) throws UserException {
+        Function udfFunction = null;
+        try {
+            // here we must first getFunction, as dropFunctionImpl will remove it
+            udfFunction = getFunction(function);
+        } catch (AnalysisException e) {
+            if (!ifExists) {
+                throw new UserException(e);
+            } else {
+                // ignore it, as drop it if exist, so can't sure it must exist
+                return;
             }
-            // Get function id for this UDF, use CatalogIdGenerator. Only get function id
-            // when isReplay is false
-            long functionId = Catalog.getCurrentCatalog().getNextId();
-            function.setId(functionId);
         }
 
-        ImmutableList.Builder<Function> builder = ImmutableList.builder();
-        if (existFuncs != null) {
-            builder.addAll(existFuncs);
+        dropFunctionImpl(function, ifExists);
+        if (udfFunction != null && udfFunction.isUDTFunction()) {
+            // all of the table function in doris will have two function
+            // one is the normal, and another is outer, the different of them is deal with
+            // empty: whether need to insert NULL result value
+            FunctionName name = new FunctionName(function.getName().getDb(),
+                    function.getName().getFunction() + "_outer");
+            FunctionSearchDesc functionOuter = new FunctionSearchDesc(name, function.getArgTypes(),
+                    function.isVariadic());
+            dropFunctionImpl(functionOuter, ifExists);
         }
-        builder.add(function);
-        name2Function.put(functionName, builder.build());
     }
 
-    public synchronized void dropFunction(FunctionSearchDesc function) throws UserException {
-        dropFunctionImpl(function);
-        Catalog.getCurrentCatalog().getEditLog().logDropFunction(function);
+    public synchronized void dropFunctionImpl(FunctionSearchDesc function, boolean ifExists) throws UserException {
+        if (FunctionUtil.dropFunctionImpl(function, ifExists, name2Function)) {
+            Env.getCurrentEnv().getEditLog().logDropFunction(function);
+            FunctionUtil.dropFromNereids(this.getFullName(), function);
+            LOG.info("finished to drop function {}", function.getName().getFunction());
+        }
     }
 
     public synchronized void replayDropFunction(FunctionSearchDesc functionSearchDesc) {
         try {
-            dropFunctionImpl(functionSearchDesc);
-        } catch (UserException e) {
-            Preconditions.checkArgument(false);
-        }
-    }
-
-    private void dropFunctionImpl(FunctionSearchDesc function) throws UserException {
-        String functionName = function.getName().getFunction();
-        List<Function> existFuncs = name2Function.get(functionName);
-        if (existFuncs == null) {
-            throw new UserException("Unknown function, function=" + function.toString());
-        }
-        boolean isFound = false;
-        ImmutableList.Builder<Function> builder = ImmutableList.builder();
-        for (Function existFunc : existFuncs) {
-            if (function.isIdentical(existFunc)) {
-                isFound = true;
-            } else {
-                builder.add(existFunc);
+            // Set ifExists to true to avoid throw exception if function is not found.
+            // It should not happen but the reason is unknown, so add warn log for debug.
+            if (!FunctionUtil.dropFunctionImpl(functionSearchDesc, true, name2Function)) {
+                LOG.warn("failed to find function to drop: {} when replay, skip",
+                        functionSearchDesc.getName().getFunction());
             }
-        }
-        if (!isFound) {
-            throw new UserException("Unknown function, function=" + function.toString());
-        }
-        ImmutableList<Function> newFunctions = builder.build();
-        if (newFunctions.isEmpty()) {
-            name2Function.remove(functionName);
-        } else {
-            name2Function.put(functionName, newFunctions);
+            FunctionUtil.dropFromNereids(this.getFullName(), functionSearchDesc);
+            LOG.info("finished to replay drop function {}", functionSearchDesc.getName().getFunction());
+        } catch (UserException e) {
+            throw new RuntimeException(e);
         }
     }
 
     public synchronized Function getFunction(Function desc, Function.CompareMode mode) {
-        List<Function> fns = name2Function.get(desc.getFunctionName().getFunction());
-        if (fns == null) {
-            return null;
-        }
-        return Function.getFunction(fns, desc, mode);
+        return FunctionUtil.getFunction(desc, mode, name2Function);
     }
 
     public synchronized Function getFunction(FunctionSearchDesc function) throws AnalysisException {
-        String functionName = function.getName().getFunction();
-        List<Function> existFuncs = name2Function.get(functionName);
-        if (existFuncs == null) {
-            throw new AnalysisException("Unknown function, function=" + function.toString());
-        }
-
-        for (Function existFunc : existFuncs) {
-            if (function.isIdentical(existFunc)) {
-                return existFunc;
-            }
-        }
-        throw new AnalysisException("Unknown function, function=" + function.toString());
+        return FunctionUtil.getFunction(function, name2Function);
     }
 
     public synchronized List<Function> getFunctions() {
-        List<Function> functions = Lists.newArrayList();
-        for (Map.Entry<String, ImmutableList<Function>> entry : name2Function.entrySet()) {
-            functions.addAll(entry.getValue());
+        return FunctionUtil.getFunctions(name2Function);
+    }
+
+    public synchronized void addEncryptKey(EncryptKey encryptKey, boolean ifNotExists) throws UserException {
+        if (addEncryptKeyImpl(encryptKey, false, ifNotExists)) {
+            Env.getCurrentEnv().getEditLog().logAddEncryptKey(encryptKey);
         }
-        return functions;
-    }
-
-    public boolean isInfoSchemaDb() {
-        return ClusterNamespace.getNameFromFullName(fullQualifiedName).equalsIgnoreCase(InfoSchemaDb.DATABASE_NAME);
-    }
-
-    public synchronized void addEncryptKey(EncryptKey encryptKey) throws UserException {
-        addEncryptKeyImpl(encryptKey, false);
-        Catalog.getCurrentCatalog().getEditLog().logAddEncryptKey(encryptKey);
     }
 
     public synchronized void replayAddEncryptKey(EncryptKey encryptKey) {
         try {
-            addEncryptKeyImpl(encryptKey, true);
+            addEncryptKeyImpl(encryptKey, true, true);
         } catch (UserException e) {
             Preconditions.checkArgument(false);
         }
     }
 
-    private void addEncryptKeyImpl(EncryptKey encryptKey, boolean isReplay) throws UserException {
+    private boolean addEncryptKeyImpl(EncryptKey encryptKey, boolean isReplay, boolean ifNotExists)
+            throws UserException {
         String keyName = encryptKey.getEncryptKeyName().getKeyName();
         EncryptKey existKey = dbEncryptKey.getName2EncryptKey().get(keyName);
         if (!isReplay) {
             if (existKey != null) {
                 if (existKey.isIdentical(encryptKey)) {
-                    throw new UserException("encryptKey [" + existKey.getEncryptKeyName().toString() + "] already exists");
+                    if (ifNotExists) {
+                        return false;
+                    }
+                    throw new UserException("encryptKey ["
+                            + existKey.getEncryptKeyName().toString() + "] already exists");
                 }
             }
         }
 
         dbEncryptKey.getName2EncryptKey().put(keyName, encryptKey);
+        return true;
     }
 
-    public synchronized void dropEncryptKey(EncryptKeySearchDesc encryptKeySearchDesc) throws UserException {
-        dropEncryptKeyImpl(encryptKeySearchDesc);
-        Catalog.getCurrentCatalog().getEditLog().logDropEncryptKey(encryptKeySearchDesc);
+    public synchronized void dropEncryptKey(EncryptKeySearchDesc encryptKeySearchDesc, boolean ifExists)
+            throws UserException {
+        if (dropEncryptKeyImpl(encryptKeySearchDesc, ifExists)) {
+            Env.getCurrentEnv().getEditLog().logDropEncryptKey(encryptKeySearchDesc);
+        }
     }
 
     public synchronized void replayDropEncryptKey(EncryptKeySearchDesc encryptKeySearchDesc) {
         try {
-            dropEncryptKeyImpl(encryptKeySearchDesc);
+            dropEncryptKeyImpl(encryptKeySearchDesc, true);
         } catch (UserException e) {
             Preconditions.checkArgument(false);
         }
     }
 
-    private void dropEncryptKeyImpl(EncryptKeySearchDesc encryptKeySearchDesc) throws UserException {
+    private boolean dropEncryptKeyImpl(EncryptKeySearchDesc encryptKeySearchDesc, boolean ifExists)
+            throws UserException {
         String keyName = encryptKeySearchDesc.getKeyEncryptKeyName().getKeyName();
         EncryptKey existKey = dbEncryptKey.getName2EncryptKey().get(keyName);
         if (existKey == null) {
+            if (ifExists) {
+                return false;
+            }
             throw new UserException("Unknown encryptKey, encryptKey=" + encryptKeySearchDesc.toString());
         }
         boolean isFound = false;
@@ -883,9 +941,13 @@ public class Database extends MetaObject implements Writable {
             isFound = true;
         }
         if (!isFound) {
+            if (ifExists) {
+                return false;
+            }
             throw new UserException("Unknown encryptKey, encryptKey=" + encryptKeySearchDesc.toString());
         }
         dbEncryptKey.getName2EncryptKey().remove(keyName);
+        return true;
     }
 
     public synchronized List<EncryptKey> getEncryptKeys() {
@@ -901,5 +963,61 @@ public class Database extends MetaObject implements Writable {
             return dbEncryptKey.getName2EncryptKey().get(keyName);
         }
         return null;
+    }
+
+    public void replayUpdateDbProperties(Map<String, String> properties) {
+        dbProperties.updateProperties(properties);
+        if (PropertyAnalyzer.hasBinlogConfig(properties)) {
+            binlogConfig = dbProperties.getBinlogConfig();
+        }
+    }
+
+    public boolean updateDbProperties(Map<String, String> properties) throws DdlException {
+        if (PropertyAnalyzer.hasBinlogConfig(properties)) {
+            BinlogConfig oldBinlogConfig = getBinlogConfig();
+            BinlogConfig newBinlogConfig = BinlogConfig.fromProperties(properties);
+
+            if (newBinlogConfig.isEnable() && !oldBinlogConfig.isEnable()) {
+                // check all tables binlog enable is true
+                for (Table table : idToTable.values()) {
+                    if (!table.isManagedTable()) {
+                        continue;
+                    }
+
+                    OlapTable olapTable = (OlapTable) table;
+                    olapTable.readLock();
+                    try {
+                        if (!olapTable.getBinlogConfig().isEnable()) {
+                            String errMsg = String
+                                    .format("binlog is not enable in table[%s] in db [%s]", table.getName(),
+                                            getFullName());
+                            throw new DdlException(errMsg);
+                        }
+                    } finally {
+                        olapTable.readUnlock();
+                    }
+                }
+            }
+        }
+
+        replayUpdateDbProperties(properties);
+        return true;
+    }
+
+    public BinlogConfig getBinlogConfig() {
+        return binlogConfig;
+    }
+
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
+    }
+
+    @Override
+    public String toString() {
+        return toJson();
+    }
+
+    public int getTableNum() {
+        return idToTable.size();
     }
 }

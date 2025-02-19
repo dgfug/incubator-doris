@@ -17,14 +17,20 @@
 
 #include "olap/short_key_index.h"
 
-#include <string>
+#include <gen_cpp/segment_v2.pb.h>
+
+#include <ostream>
 
 #include "gutil/strings/substitute.h"
+#include "short_key_index.h"
+#include "util/bvar_helper.h"
 #include "util/coding.h"
 
 using strings::Substitute;
 
 namespace doris {
+
+static bvar::Adder<size_t> g_short_key_index_memory_bytes("doris_short_key_index_memory_bytes");
 
 Status ShortKeyIndexBuilder::add_item(const Slice& key) {
     put_varint32(&_offset_buf, _key_buf.size());
@@ -56,9 +62,8 @@ Status ShortKeyIndexDecoder::parse(const Slice& body, const segment_v2::ShortKey
 
     // check if body size match footer's information
     if (body.size != (_footer.key_bytes() + _footer.offset_bytes())) {
-        return Status::Corruption(strings::Substitute("Index size not match, need=$0, real=$1",
-                                                      _footer.key_bytes() + _footer.offset_bytes(),
-                                                      body.size));
+        return Status::Corruption("Index size not match, need={}, real={}",
+                                  _footer.key_bytes() + _footer.offset_bytes(), body.size);
     }
 
     // set index buffer
@@ -84,7 +89,19 @@ Status ShortKeyIndexDecoder::parse(const Slice& body, const segment_v2::ShortKey
         return Status::Corruption("Still has data after parse all key offset");
     }
     _parsed = true;
+
+    g_short_key_index_memory_bytes << sizeof(_footer) + _key_data.size +
+                                              _offsets.size() * sizeof(uint32_t) + sizeof(*this);
+
     return Status::OK();
+}
+
+ShortKeyIndexDecoder::~ShortKeyIndexDecoder() {
+    if (_parsed) {
+        g_short_key_index_memory_bytes << -sizeof(_footer) - _key_data.size -
+                                                  _offsets.size() * sizeof(uint32_t) -
+                                                  sizeof(*this);
+    }
 }
 
 } // namespace doris

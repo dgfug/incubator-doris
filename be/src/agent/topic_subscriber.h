@@ -15,30 +15,30 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_AGENT_TOPIC_SUBSCRIBER_H
-#define DORIS_BE_SRC_AGENT_TOPIC_SUBSCRIBER_H
+#pragma once
 
-#include <boost/thread.hpp>
+#include <gen_cpp/BackendService_types.h>
+#include <glog/logging.h>
+
 #include <map>
 #include <shared_mutex>
-
-#include "agent/topic_listener.h"
-#include "gen_cpp/AgentService_types.h"
+#include <vector>
 
 namespace doris {
+class TopicListener;
 
 class TopicSubscriber {
 public:
     TopicSubscriber();
-    ~TopicSubscriber();
-    // Put the topic type and listener to the map
-    void register_listener(TTopicType::type topic_type, TopicListener* listener);
-    // Handle all updates in the request
-    void handle_updates(const TAgentPublishRequest& agent_publish_request);
+    ~TopicSubscriber() = default;
+
+    void register_listener(TTopicInfoType::type topic_type,
+                           std::unique_ptr<TopicListener> topic_listener);
+
+    void handle_topic_info(const TPublishTopicRequest& topic_request);
 
 private:
-    std::map<TTopicType::type, std::vector<TopicListener*>> _registered_listeners;
+    std::map<TTopicInfoType::type, std::unique_ptr<TopicListener>> _registered_listeners;
     std::shared_mutex _listener_mtx;
 };
 } // namespace doris
-#endif

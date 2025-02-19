@@ -14,13 +14,26 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/kudu/blob/master/src/kudu/util/block_bloom_filter.h
+// and modified by Doris
 
 #pragma once
+
+#include "vec/common/string_ref.h"
+#ifdef __AVX2__
+#include <immintrin.h>
+
+#include "gutil/macros.h"
+#endif
 #include "common/status.h"
 #include "fmt/format.h"
-#include "gutil/macros.h"
 #include "util/hash_util.hpp"
 #include "util/slice.h"
+
+namespace butil {
+class IOBufAsZeroCopyInputStream;
+}
 
 namespace doris {
 
@@ -32,16 +45,24 @@ namespace doris {
 
 // BlockBloomFilter will not store null values, and will always return a false if the input is null.
 
+// Some constants used in hashing. #defined for efficiency reasons.
+#define BLOOM_HASH_CONSTANTS                                                                   \
+    0x47b6137bU, 0x44974d91U, 0x8824ad5bU, 0xa2b7289dU, 0x705495c7U, 0x2df1424bU, 0x9efc4947U, \
+            0x5c6bfb31U
+
 class BlockBloomFilter {
 public:
     explicit BlockBloomFilter();
     ~BlockBloomFilter();
 
+    BlockBloomFilter(const BlockBloomFilter&) = delete;
+    BlockBloomFilter& operator=(const BlockBloomFilter&) = delete;
+
     Status init(int log_space_bytes, uint32_t hash_seed);
     // Initialize the BlockBloomFilter from a populated "directory" structure.
     // Useful for initializing the BlockBloomFilter by de-serializing a custom protobuf message.
-    Status init_from_directory(int log_space_bytes, const Slice& directory, bool always_false,
-                               uint32_t hash_seed);
+    Status init_from_directory(int log_space_bytes, butil::IOBufAsZeroCopyInputStream* data,
+                               const size_t data_size, bool always_false, uint32_t hash_seed);
 
     void close();
 
@@ -52,23 +73,89 @@ public:
     // non-equal values will have the same hash value) is 0.
     void insert(uint32_t hash) noexcept;
     // Same as above with convenience of hashing the key.
-    void insert(const Slice& key) noexcept {
+    void insert(const StringRef& key) noexcept {
         if (key.data) {
-            insert(HashUtil::murmur_hash3_32(key.data, key.size, _hash_seed));
+            insert(HashUtil::crc_hash(key.data, key.size, _hash_seed));
         }
     }
 
+#ifdef __AVX2__
+
+    static inline ATTRIBUTE_ALWAYS_INLINE __attribute__((__target__("avx2"))) __m256i make_mark(
+            const uint32_t hash) {
+        const __m256i ones = _mm256_set1_epi32(1);
+        const __m256i rehash = _mm256_setr_epi32(BLOOM_HASH_CONSTANTS);
+        // Load hash into a YMM register, repeated eight times
+        __m256i hash_data = _mm256_set1_epi32(hash);
+        // Multiply-shift hashing ala Dietzfelbinger et al.: multiply 'hash' by eight different
+        // odd constants, then keep the 5 most significant bits from each product.
+        hash_data = _mm256_mullo_epi32(rehash, hash_data);
+        hash_data = _mm256_srli_epi32(hash_data, 27);
+        // Use these 5 bits to shift a single bit to a location in each 32-bit lane
+        return _mm256_sllv_epi32(ones, hash_data);
+    }
+#endif
     // Finds an element in the BloomFilter, returning true if it is found and false (with
     // high probability) if it is not.
-    bool find(uint32_t hash) const noexcept;
-    // Same as above with convenience of hashing the key.
-    bool find(const Slice& key) const noexcept {
-        if (key.data) {
-            return find(HashUtil::murmur_hash3_32(key.data, key.size, _hash_seed));
-        } else {
+    ALWAYS_INLINE bool find(uint32_t hash) const noexcept {
+        if (_always_false) {
             return false;
         }
+        const uint32_t bucket_idx = rehash32to32(hash) & _directory_mask;
+#ifdef __AVX2__
+        const __m256i mask = make_mark(hash);
+        const __m256i bucket = reinterpret_cast<__m256i*>(_directory)[bucket_idx];
+        // We should return true if 'bucket' has a one wherever 'mask' does. _mm256_testc_si256
+        // takes the negation of its first argument and ands that with its second argument. In
+        // our case, the result is zero everywhere iff there is a one in 'bucket' wherever
+        // 'mask' is one. testc returns 1 if the result is 0 everywhere and returns 0 otherwise.
+        const bool result = _mm256_testc_si256(bucket, mask);
+        _mm256_zeroupper();
+        return result;
+#else
+        return bucket_find(bucket_idx, hash);
+#endif
     }
+    // Same as above with convenience of hashing the key.
+    bool find(const StringRef& key) const noexcept {
+        if (key.data) {
+            return find(HashUtil::crc_hash(key.data, key.size, _hash_seed));
+        }
+        return false;
+    }
+
+#ifdef __ARM_NEON
+    void make_find_mask(uint32_t key, uint32x4_t* masks) const noexcept {
+        uint32x4_t hash_data_1 = vdupq_n_u32(key);
+        uint32x4_t hash_data_2 = vdupq_n_u32(key);
+
+        uint32x4_t rehash_1 = vld1q_u32(&kRehash[0]);
+        uint32x4_t rehash_2 = vld1q_u32(&kRehash[4]);
+
+        //  masks[i] = key * kRehash[i];
+        hash_data_1 = vmulq_u32(rehash_1, hash_data_1);
+        hash_data_2 = vmulq_u32(rehash_2, hash_data_2);
+        //  masks[i] = masks[i] >> shift_num;
+        hash_data_1 = vshrq_n_u32(hash_data_1, shift_num);
+        hash_data_2 = vshrq_n_u32(hash_data_2, shift_num);
+
+        const uint32x4_t ones = vdupq_n_u32(1);
+
+        // masks[i] = 0x1 << masks[i];
+        masks[0] = vshlq_u32(ones, reinterpret_cast<int32x4_t>(hash_data_1));
+        masks[1] = vshlq_u32(ones, reinterpret_cast<int32x4_t>(hash_data_2));
+    }
+#else
+    void make_find_mask(uint32_t key, uint32_t* masks) const noexcept {
+        for (int i = 0; i < kBucketWords; ++i) {
+            masks[i] = key * kRehash[i];
+
+            masks[i] = masks[i] >> shift_num;
+
+            masks[i] = 0x1 << masks[i];
+        }
+    }
+#endif
 
     // Computes the logical OR of this filter with 'other' and stores the result in this
     // filter.
@@ -109,7 +196,8 @@ private:
     // log2(number of bits in a BucketWord)
     static constexpr int kLogBucketWordBits = 5;
     static constexpr BucketWord kBucketWordMask = (1 << kLogBucketWordBits) - 1;
-
+    // (>> 27) is equivalent to (mod 32)
+    static constexpr auto shift_num = ((1 << kLogBucketWordBits) - kLogBucketWordBits);
     // log2(number of bytes in a bucket)
     static constexpr int kLogBucketByteSize = 5;
     // Bucket size in bytes.
@@ -162,10 +250,6 @@ private:
     void bucket_insert_avx2(uint32_t bucket_idx, uint32_t hash) noexcept
             __attribute__((__target__("avx2")));
 
-    // A faster SIMD version of BucketFind().
-    bool bucket_find_avx2(uint32_t bucket_idx, uint32_t hash) const noexcept
-            __attribute__((__target__("avx2")));
-
     // Computes out[i] |= in[i] for the arrays 'in' and 'out' of length 'n' using AVX2
     // instructions. 'n' must be a multiple of 32.
     static void or_equal_array_avx2(size_t n, const uint8_t* __restrict__ in,
@@ -173,19 +257,14 @@ private:
 
 #endif
     // Size of the internal directory structure in bytes.
-    int64_t directory_size() const { return 1ULL << log_space_bytes(); }
-
-    // Some constants used in hashing. #defined for efficiency reasons.
-#define BLOOM_HASH_CONSTANTS                                                                   \
-    0x47b6137bU, 0x44974d91U, 0x8824ad5bU, 0xa2b7289dU, 0x705495c7U, 0x2df1424bU, 0x9efc4947U, \
-            0x5c6bfb31U
+    size_t directory_size() const { return 1ULL << log_space_bytes(); }
 
     // kRehash is used as 8 odd 32-bit unsigned ints.  See Dietzfelbinger et al.'s "A
     // reliable randomized algorithm for the closest-pair problem".
     static constexpr uint32_t kRehash[8] __attribute__((aligned(32))) = {BLOOM_HASH_CONSTANTS};
 
     // Get 32 more bits of randomness from a 32-bit hash:
-    static inline uint32_t rehash32to32(const uint32_t hash) {
+    static ALWAYS_INLINE uint32_t rehash32to32(const uint32_t hash) {
         // Constants generated by uuidgen(1) with the -r flag
         static constexpr uint64_t m = 0x7850f11ec6d14889ULL;
         static constexpr uint64_t a = 0x6773610597ca4c63ULL;
@@ -197,10 +276,6 @@ private:
         // Rehash32to32(hash2) is minimal.
         return (static_cast<uint64_t>(hash) * m + a) >> 32U;
     }
-
-    DISALLOW_COPY_AND_ASSIGN(BlockBloomFilter);
-
-    std::unique_ptr<char[]> _mem_holder;
 };
 
 } // namespace doris

@@ -14,11 +14,21 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/bitmap.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_BITMAP_H
-#define DORIS_BE_SRC_COMMON_UTIL_BITMAP_H
+#pragma once
 
-#include "gutil/strings/fastmem.h"
+#include <glog/logging.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "gutil/port.h"
 #include "util/bit_util.h"
 
 namespace doris {
@@ -94,9 +104,8 @@ inline bool BitmapIsAllZero(const uint8_t* bitmap, size_t offset, size_t bitmap_
 //
 // It is assumed that both bitmaps have 'bitmap_size' number of bits.
 inline bool BitmapEquals(const uint8_t* bm1, const uint8_t* bm2, size_t bitmap_size) {
-    // Use memeq() to check all of the full bytes.
     size_t num_full_bytes = bitmap_size >> 3;
-    if (!strings::memeq(bm1, bm2, num_full_bytes)) {
+    if (memcmp(bm1, bm2, num_full_bytes)) {
         return false;
     }
 
@@ -176,7 +185,7 @@ private:
 private:
     size_t offset_;
     size_t num_bits_;
-    const uint8_t* map_;
+    const uint8_t* map_ = nullptr;
 };
 
 /// Bitmap vector utility class.
@@ -247,5 +256,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

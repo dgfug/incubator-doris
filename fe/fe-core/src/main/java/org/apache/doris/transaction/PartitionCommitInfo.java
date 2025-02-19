@@ -17,8 +17,6 @@
 
 package org.apache.doris.transaction;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonUtils;
@@ -33,23 +31,27 @@ public class PartitionCommitInfo implements Writable {
 
     @SerializedName(value = "partitionId")
     private long partitionId;
+    @SerializedName(value = "range")
+    private String range;
     @SerializedName(value = "version")
     private long version;
     @SerializedName(value = "versionTime")
     private long versionTime;
-    @SerializedName(value = "versionHash")
-    private long versionHash;
+    @SerializedName(value = "isTempPartition")
+    private boolean isTempPartition;
 
     public PartitionCommitInfo() {
-        
+
     }
 
-    public PartitionCommitInfo(long partitionId, long version, long versionHash, long visibleTime) {
+    public PartitionCommitInfo(long partitionId, String partitionRange, long version, long visibleTime,
+            boolean isTempPartition) {
         super();
         this.partitionId = partitionId;
+        this.range = partitionRange;
         this.version = version;
         this.versionTime = visibleTime;
-        this.versionHash = versionHash;
+        this.isTempPartition = isTempPartition;
     }
 
     @Override
@@ -59,40 +61,45 @@ public class PartitionCommitInfo implements Writable {
     }
 
     public static PartitionCommitInfo read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_88) {
-            long partitionId = in.readLong();
-            long version = in.readLong();
-            long versionHash = in.readLong();
-            return new PartitionCommitInfo(partitionId, version, versionHash, System.currentTimeMillis());
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, PartitionCommitInfo.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, PartitionCommitInfo.class);
     }
 
     public long getPartitionId() {
         return partitionId;
     }
 
+    public String getPartitionRange() {
+        return range;
+    }
+
     public long getVersion() {
         return version;
     }
-    
+
     public long getVersionTime() {
         return versionTime;
     }
 
-    public long getVersionHash() {
-        return versionHash;
+    public void setVersion(long version) {
+        this.version = version;
     }
-    
+
+    public void setVersionTime(long versionTime) {
+        this.versionTime = versionTime;
+    }
+
+    public boolean isTempPartition() {
+        return this.isTempPartition;
+    }
+
     @Override
     public String toString() {
-        StringBuilder sb = new StringBuilder("partitionid=");
+        StringBuilder sb = new StringBuilder("partitionId=");
         sb.append(partitionId);
         sb.append(", version=").append(version);
-        sb.append(", versionHash=").append(versionHash);
         sb.append(", versionTime=").append(versionTime);
+        sb.append(", isTemp=").append(isTempPartition);
         return sb.toString();
     }
 }

@@ -20,18 +20,16 @@ package org.apache.doris.analysis;
 import org.apache.doris.analysis.BinaryPredicate.Operator;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ScalarType;
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.proc.ExportProcNode;
 import org.apache.doris.common.util.OrderByPair;
-import org.apache.doris.load.ExportJob.JobState;
+import org.apache.doris.load.ExportJobState;
 import org.apache.doris.qe.ShowResultSetMetaData;
 
 import com.google.common.base.Strings;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -42,19 +40,21 @@ import java.util.List;
 //
 // syntax:
 //      SHOW EXPORT [FROM db] [where ...]
-public class ShowExportStmt extends ShowStmt {
+public class ShowExportStmt extends ShowStmt implements NotFallbackInParser {
     private static final Logger LOG = LogManager.getLogger(ShowExportStmt.class);
 
+    private String ctlName;
     private String dbName;
-    private Expr whereClause;
-    private LimitElement limitElement;
-    private List<OrderByElement> orderByElements;
+    private final Expr whereClause;
+    private final LimitElement limitElement;
+    private final List<OrderByElement> orderByElements;
 
     private long jobId = 0;
     private String label = null;
+    private boolean isLabelUseLike = false;
     private String stateValue = null;
 
-    private JobState jobState;
+    private ExportJobState jobState;
 
     private ArrayList<OrderByPair> orderByPairs;
 
@@ -63,6 +63,19 @@ public class ShowExportStmt extends ShowStmt {
         this.whereClause = whereExpr;
         this.orderByElements = orderByElements;
         this.limitElement = limitElement;
+    }
+
+    public ShowExportStmt(String ctl, String db, Expr whereExpr, List<OrderByElement> orderByElements,
+            LimitElement limitElement) {
+        this.ctlName = ctl;
+        this.dbName = db;
+        this.whereClause = whereExpr;
+        this.orderByElements = orderByElements;
+        this.limitElement = limitElement;
+    }
+
+    public String getCtlName() {
+        return ctlName;
     }
 
     public String getDbName() {
@@ -84,7 +97,7 @@ public class ShowExportStmt extends ShowStmt {
         return this.jobId;
     }
 
-    public JobState getJobState() {
+    public ExportJobState getJobState() {
         if (Strings.isNullOrEmpty(stateValue)) {
             return null;
         }
@@ -95,16 +108,25 @@ public class ShowExportStmt extends ShowStmt {
         return label;
     }
 
+    public boolean isLabelUseLike() {
+        return isLabelUseLike;
+    }
+
     @Override
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
         super.analyze(analyzer);
+        if (Strings.isNullOrEmpty(ctlName)) {
+            ctlName = analyzer.getDefaultCatalog();
+            if (Strings.isNullOrEmpty(ctlName)) {
+                ErrorReport.reportAnalysisException(ErrorCode.ERR_UNKNOWN_CATALOG);
+            }
+        }
+
         if (Strings.isNullOrEmpty(dbName)) {
             dbName = analyzer.getDefaultDb();
             if (Strings.isNullOrEmpty(dbName)) {
                 ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
             }
-        } else {
-            dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
 
         // analyze where clause if not null
@@ -114,7 +136,7 @@ public class ShowExportStmt extends ShowStmt {
 
         // order by
         if (orderByElements != null && !orderByElements.isEmpty()) {
-            orderByPairs = new ArrayList<OrderByPair>();
+            orderByPairs = new ArrayList<>();
             for (OrderByElement orderByElement : orderByElements) {
                 if (!(orderByElement.getExpr() instanceof SlotRef)) {
                     throw new AnalysisException("Should order by column");
@@ -132,82 +154,48 @@ public class ShowExportStmt extends ShowStmt {
             return;
         }
 
-        boolean valid = true;
-        boolean hasJobId = false;
-        boolean hasState = false;
-        boolean hasLabel = false;
-        
-        CHECK: {
-            // check predicate type
-            if (whereExpr instanceof BinaryPredicate) {
-                BinaryPredicate binaryPredicate = (BinaryPredicate) whereExpr;
-                if (binaryPredicate.getOp() != Operator.EQ) {
-                    valid = false;
-                    break CHECK;
-                }
-            } else {
-                valid = false;
-                break CHECK;
-            }
-            
-            // left child
-            if (!(whereExpr.getChild(0) instanceof SlotRef)) {
-                valid = false;
-                break CHECK;
-            }
-            String leftKey = ((SlotRef) whereExpr.getChild(0)).getColumnName();
-            if (leftKey.equalsIgnoreCase("id")) {
-                hasJobId = true;
-            } else if (leftKey.equalsIgnoreCase("state")) {
-                hasState = true;
-            } else if (leftKey.equalsIgnoreCase("label")) {
-                hasLabel = true;
-            } else {
-                valid = false;
-                break CHECK;
-            }
-            
-            // right child
-            if (hasState) {
-                if (!(whereExpr.getChild(1) instanceof StringLiteral)) {
-                    valid = false;
-                    break CHECK;
+        boolean valid = false;
+
+        // enumerate all possible conditions
+        if (whereExpr.getChild(0) instanceof SlotRef) {
+            String leftKey = ((SlotRef) whereExpr.getChild(0)).getColumnName().toLowerCase();
+
+            if (whereExpr instanceof BinaryPredicate && ((BinaryPredicate) whereExpr).getOp() == Operator.EQ) {
+                if ("id".equals(leftKey) && whereExpr.getChild(1) instanceof IntLiteral) {
+                    jobId = ((IntLiteral) whereExpr.getChild(1)).getLongValue();
+                    valid = true;
+
+                } else if ("state".equals(leftKey) && whereExpr.getChild(1) instanceof StringLiteral) {
+                    String value = whereExpr.getChild(1).getStringValue();
+                    if (!Strings.isNullOrEmpty(value)) {
+                        stateValue = value.toUpperCase();
+                        try {
+                            jobState = ExportJobState.valueOf(stateValue);
+                            valid = true;
+                        } catch (IllegalArgumentException e) {
+                            LOG.warn("illegal state argument in export stmt. stateValue={}, error={}", stateValue, e);
+                        }
+                    }
+
+                } else if ("label".equals(leftKey) && whereExpr.getChild(1) instanceof StringLiteral) {
+                    label = whereExpr.getChild(1).getStringValue();
+                    valid = true;
                 }
 
-                String value = ((StringLiteral) whereExpr.getChild(1)).getStringValue();
-                if (Strings.isNullOrEmpty(value)) {
-                    valid = false;
-                    break CHECK;
+            } else if (whereExpr instanceof LikePredicate
+                    && ((LikePredicate) whereExpr).getOp() == LikePredicate.Operator.LIKE) {
+                if ("label".equals(leftKey) && whereExpr.getChild(1) instanceof StringLiteral) {
+                    label = whereExpr.getChild(1).getStringValue();
+                    isLabelUseLike = true;
+                    valid = true;
                 }
-
-                stateValue = value.toUpperCase();
-
-                try {
-                    jobState = JobState.valueOf(stateValue);
-                } catch (IllegalArgumentException e) {
-                    LOG.warn("illegal state argument in export stmt. stateValue={}, error={}", stateValue, e);
-                    valid = false;
-                    break CHECK;
-                }
-            } else if (hasJobId) {
-                if (!(whereExpr.getChild(1) instanceof IntLiteral)) {
-                    valid = false;
-                    break CHECK;
-                }
-                jobId = ((IntLiteral) whereExpr.getChild(1)).getLongValue();
-            } else if (hasLabel) {
-                if (!(whereExpr.getChild(1) instanceof StringLiteral)) {
-                    valid = false;
-                    break CHECK;
-                }
-                label = ((StringLiteral) whereExpr.getChild(1)).getStringValue();
             }
         }
 
         if (!valid) {
             throw new AnalysisException("Where clause should looks like below: "
-                    + " ID = $your_job_id, or STATE = \"PENDING|EXPORTING|FINISHED|CANCELLED\", " +
-                    "or label=\"xxx\"");
+                    + " ID = $your_job_id, or STATE = \"PENDING|EXPORTING|FINISHED|CANCELLED\", "
+                    + "or LABEL = \"xxx\" or LABEL like \"xxx%\"");
         }
     }
 
@@ -216,7 +204,12 @@ public class ShowExportStmt extends ShowStmt {
         StringBuilder sb = new StringBuilder();
         sb.append("SHOW EXPORT ");
         if (!Strings.isNullOrEmpty(dbName)) {
-            sb.append("FROM `").append(dbName).append("`");
+            if (!Strings.isNullOrEmpty(ctlName)) {
+                sb.append("FROM `").append(ctlName).append("`.`");
+            } else {
+                sb.append("FROM `");
+            }
+            sb.append(dbName).append("`");
         }
 
         if (whereClause != null) {

@@ -14,11 +14,12 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/stopwatch.hpp
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
-#define DORIS_BE_SRC_COMMON_UTIL_STOPWATCH_HPP
+#pragma once
 
-#include <boost/cstdint.hpp>
 #include <time.h>
 
 namespace doris {
@@ -36,6 +37,8 @@ public:
         _total_time = 0;
         _running = false;
     }
+
+    timespec start_time() const { return _start; }
 
     void start() {
         if (!_running) {
@@ -74,6 +77,14 @@ public:
                (end.tv_nsec - _start.tv_nsec);
     }
 
+    // Returns time in nanosecond.
+    int64_t elapsed_time_seconds(timespec end) const {
+        if (!_running) {
+            return _total_time / 1000L / 1000L / 1000L;
+        }
+        return end.tv_sec - _start.tv_sec;
+    }
+
 private:
     timespec _start;
     uint64_t _total_time; // in nanosec
@@ -91,6 +102,4 @@ using MonotonicStopWatch = CustomStopWatch<CLOCK_MONOTONIC>;
 // Stop watch for reporting elapsed nanosec based on CLOCK_THREAD_CPUTIME_ID.
 using ThreadCpuStopWatch = CustomStopWatch<CLOCK_THREAD_CPUTIME_ID>;
 
-}
-
-#endif
+} // namespace doris

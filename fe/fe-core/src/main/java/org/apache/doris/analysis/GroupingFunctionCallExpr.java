@@ -21,9 +21,6 @@ import org.apache.doris.catalog.Function;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,7 +29,6 @@ import java.util.List;
  * real slots, and then set real slot to realChildren
  */
 public class GroupingFunctionCallExpr extends FunctionCallExpr {
-    private static final Logger LOG = LogManager.getLogger(FunctionCallExpr.class);
     private boolean childrenReseted = false;
     private List<Expr> realChildren;
 
@@ -73,8 +69,7 @@ public class GroupingFunctionCallExpr extends FunctionCallExpr {
         }
         Type[] childTypes = new Type[1];
         childTypes[0] = Type.BIGINT;
-        fn = getBuiltinFunction(analyzer, getFnName().getFunction(), childTypes,
-                Function.CompareMode.IS_IDENTICAL);
+        fn = getBuiltinFunction(getFnName().getFunction(), childTypes, Function.CompareMode.IS_IDENTICAL);
         this.type = fn.getReturnType();
     }
 
@@ -120,5 +115,10 @@ public class GroupingFunctionCallExpr extends FunctionCallExpr {
 
     public List<Expr> getRealChildren() {
         return realChildren;
+    }
+
+    @Override
+    public boolean supportSerializable() {
+        return false;
     }
 }

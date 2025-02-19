@@ -20,16 +20,19 @@ package org.apache.doris.mysql;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
+import org.apache.doris.qe.GlobalVariable;
 
 import com.google.common.base.Strings;
-import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.UnsupportedEncodingException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
+import java.security.SecureRandom;
 import java.util.Random;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 // this is stolen from MySQL
 //
@@ -75,22 +78,27 @@ import java.util.Random;
 public class MysqlPassword {
     private static final Logger LOG = LogManager.getLogger(MysqlPassword.class);
     // TODO(zhaochun): this is duplicated with handshake packet.
-    public static final byte EMPTY_PASSWORD[] = new byte[0];
+    public static final byte[] EMPTY_PASSWORD = new byte[0];
     public static final int SCRAMBLE_LENGTH = 20;
     public static final int SCRAMBLE_LENGTH_HEX_LENGTH = 2 * SCRAMBLE_LENGTH + 1;
     public static final byte PVERSION41_CHAR = '*';
-    private static final byte DIG_VEC_UPPER[] = {'0', '1', '2', '3', '4', '5', '6', '7',
+    private static final byte[] DIG_VEC_UPPER = {'0', '1', '2', '3', '4', '5', '6', '7',
             '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
-    private static Random random = new Random(System.currentTimeMillis());
+    private static final Random random = new SecureRandom();
+    private static final Set<Character> complexCharSet;
+    public static final int MIN_PASSWORD_LEN = 8;
+
+    static {
+        complexCharSet = "~!@#$%^&*()_+|<>,.?/:;'[]{}".chars().mapToObj(c -> (char) c).collect(Collectors.toSet());
+    }
 
     public static byte[] createRandomString(int len) {
         byte[] bytes = new byte[len];
         random.nextBytes(bytes);
         // NOTE: MySQL challenge string can't contain 0.
         for (int i = 0; i < len; ++i) {
-            if ((bytes[i] >= 'a' && bytes[i] <= 'z') 
-                    || (bytes[i] >= 'A' && bytes[i] <='Z')) {
-            } else {
+            if (!((bytes[i] >= 'a' && bytes[i] <= 'z')
+                    || (bytes[i] >= 'A' && bytes[i] <= 'Z'))) {
                 bytes[i] = (byte) ('a' + (bytes[i] % 26));
             }
         }
@@ -110,7 +118,7 @@ public class MysqlPassword {
     }
 
     // Check that scrambled message corresponds to the password; the function
-    // is used by server to check that recieved reply is authentic.
+    // is used by server to check that received reply is authentic.
     // This function does not check lengths of given strings: message must be
     // null-terminated, reply and hash_stage2 must be at least SHA1_HASH_SIZE
     // long (if not, something fishy is going on).
@@ -141,10 +149,10 @@ public class MysqlPassword {
 
         // compute result2: SHA-1(result1)
         md.reset();
-        byte[] candidateHash2 = md.digest(hashStage1);
-
-        // compare result2 and hashStage2
-        return Arrays.equals(candidateHash2, hashStage2);
+        md.update(hashStage1);
+        byte[] candidateHash2 = md.digest();
+        // compare result2 and hashStage2 using MessageDigest.isEqual()
+        return MessageDigest.isEqual(candidateHash2, hashStage2);
     }
 
     // MySQL client use this function to form scramble password
@@ -171,8 +179,8 @@ public class MysqlPassword {
         return scramblePassword;
     }
 
-    // 将用户传入的字符串转化为对应的密码Hash值
-    // 用于用户设定密码
+    // Convert plaintext password into the corresponding 2-staged hashed password
+    // Used for users to set password
     private static byte[] twoStageHash(String password) {
         try {
             byte[] passBytes = password.getBytes("UTF-8");
@@ -279,5 +287,33 @@ public class MysqlPassword {
         }
 
         return passwd;
+    }
+
+    public static void validatePlainPassword(long validaPolicy, String text) throws AnalysisException {
+        if (validaPolicy == GlobalVariable.VALIDATE_PASSWORD_POLICY_STRONG) {
+            if (Strings.isNullOrEmpty(text) || text.length() < MIN_PASSWORD_LEN) {
+                throw new AnalysisException(
+                        "Violate password validation policy: STRONG. The password must be at least 8 characters");
+            }
+
+            int i = 0;
+            if (text.chars().anyMatch(Character::isDigit)) {
+                i++;
+            }
+            if (text.chars().anyMatch(Character::isLowerCase)) {
+                i++;
+            }
+            if (text.chars().anyMatch(Character::isUpperCase)) {
+                i++;
+            }
+            if (text.chars().anyMatch(c -> complexCharSet.contains((char) c))) {
+                i++;
+            }
+            if (i < 3) {
+                throw new AnalysisException(
+                        "Violate password validation policy: STRONG. The password must contain at least 3 types of "
+                                + "numbers, uppercase letters, lowercase letters and special characters.");
+            }
+        }
     }
 }

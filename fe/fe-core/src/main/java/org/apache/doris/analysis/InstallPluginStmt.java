@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -29,7 +29,7 @@ import org.apache.doris.qe.ConnectContext;
 
 import java.util.Map;
 
-public class InstallPluginStmt extends DdlStmt {
+public class InstallPluginStmt extends DdlStmt implements NotFallbackInParser {
 
     private String pluginPath;
     private Map<String, String> properties;
@@ -61,7 +61,7 @@ public class InstallPluginStmt extends DdlStmt {
         }
 
         // check operation privilege
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
     }
@@ -87,5 +87,9 @@ public class InstallPluginStmt extends DdlStmt {
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
     }
-}
 
+    @Override
+    public StmtType stmtType() {
+        return StmtType.INSTALL;
+    }
+}

@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Map;
 
 // ADMIN CHECK TABLET (id1, id2, ...) PROPERTIES ("type" = "check_consistency");
-public class AdminCheckTabletsStmt extends DdlStmt {
+public class AdminCheckTabletsStmt extends DdlStmt implements NotFallbackInParser {
 
     private List<Long> tabletIds;
     private Map<String, String> properties;
@@ -69,7 +69,7 @@ public class AdminCheckTabletsStmt extends DdlStmt {
         super.analyze(analyzer);
 
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 

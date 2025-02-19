@@ -17,22 +17,22 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
 
-public class CancelBackupStmt extends CancelStmt {
+public class CancelBackupStmt extends CancelStmt implements NotFallbackInParser {
 
     private String dbName;
     private boolean isRestore;
-    
+
     public CancelBackupStmt(String dbName, boolean isRestore) {
         this.dbName = dbName;
         this.isRestore = isRestore;
@@ -54,12 +54,11 @@ public class CancelBackupStmt extends CancelStmt {
             if (Strings.isNullOrEmpty(dbName)) {
                 throw new AnalysisException("No database selected");
             }
-        } else {
-            dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
         }
 
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkDbPriv(ConnectContext.get(), dbName, PrivPredicate.LOAD)) {
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkDbPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME, dbName, PrivPredicate.LOAD)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "LOAD");
         }
     }
@@ -82,5 +81,10 @@ public class CancelBackupStmt extends CancelStmt {
     @Override
     public String toString() {
         return toSql();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CANCEL;
     }
 }

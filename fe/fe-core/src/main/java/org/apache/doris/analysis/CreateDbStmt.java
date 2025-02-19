@@ -17,47 +17,70 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.cluster.ClusterNamespace;
-import org.apache.doris.common.AnalysisException;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.InternalDatabaseUtil;
+import org.apache.doris.common.util.PrintableMap;
+import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-import com.google.common.base.Strings;
+import org.apache.commons.lang3.StringUtils;
 
-// 用于描述CREATE DATABASE的内部结构
-public class CreateDbStmt extends DdlStmt {
+import java.util.HashMap;
+import java.util.Map;
+
+public class CreateDbStmt extends DdlStmt implements NotFallbackInParser {
     private boolean ifNotExists;
+    private String ctlName;
     private String dbName;
+    private Map<String, String> properties;
 
-    public CreateDbStmt(boolean ifNotExists, String dbName) {
+    public CreateDbStmt(boolean ifNotExists, DbName dbName, Map<String, String> properties) {
         this.ifNotExists = ifNotExists;
-        this.dbName = dbName;
+        this.ctlName = dbName.getCtl();
+        this.dbName = dbName.getDb();
+        this.properties = properties == null ? new HashMap<>() : properties;
+
+        if (Config.force_enable_feature_binlog
+                && !this.properties.containsKey(PropertyAnalyzer.PROPERTIES_BINLOG_ENABLE)) {
+            this.properties.put(PropertyAnalyzer.PROPERTIES_BINLOG_ENABLE, "true");
+        }
     }
 
     public String getFullDbName() {
         return dbName;
     }
 
+    public String getCtlName() {
+        return ctlName;
+    }
+
     public boolean isSetIfNotExists() {
         return ifNotExists;
     }
 
-    @Override
-    public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
-        super.analyze(analyzer);
-        if (Strings.isNullOrEmpty(analyzer.getClusterName())) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_CLUSTER_NO_SELECT_CLUSTER);
-        }
-        FeNameFormat.checkDbName(dbName);
-        dbName = ClusterNamespace.getFullName(getClusterName(), dbName);
+    public Map<String, String> getProperties() {
+        return properties;
+    }
 
-        if (!Catalog.getCurrentCatalog().getAuth().checkDbPriv(ConnectContext.get(), dbName, PrivPredicate.CREATE)) {
-            ErrorReport.reportAnalysisException(ErrorCode.ERR_DB_ACCESS_DENIED, analyzer.getQualifiedUser(), dbName);
+    @Override
+    public void analyze(Analyzer analyzer) throws UserException {
+        super.analyze(analyzer);
+        if (StringUtils.isEmpty(ctlName)) {
+            ctlName = Env.getCurrentEnv().getCurrentCatalog().getName();
+        }
+        FeNameFormat.checkCatalogName(ctlName);
+        FeNameFormat.checkDbName(dbName);
+        InternalDatabaseUtil.checkDatabase(dbName, ConnectContext.get());
+        if (!Env.getCurrentEnv().getAccessManager()
+                .checkDbPriv(ConnectContext.get(), ctlName, dbName, PrivPredicate.CREATE)) {
+            ErrorReport.reportAnalysisException(
+                    ErrorCode.ERR_DBACCESS_DENIED_ERROR, analyzer.getQualifiedUser(), dbName);
         }
     }
 
@@ -70,6 +93,16 @@ public class CreateDbStmt extends DdlStmt {
     public String toSql() {
         StringBuilder stringBuilder = new StringBuilder();
         stringBuilder.append("CREATE DATABASE ").append("`").append(dbName).append("`");
+        if (properties.size() > 0) {
+            stringBuilder.append("\nPROPERTIES (\n");
+            stringBuilder.append(new PrintableMap<>(properties, "=", true, true, false));
+            stringBuilder.append("\n)");
+        }
         return stringBuilder.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.CREATE;
     }
 }

@@ -19,15 +19,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
-#include <map>
-#include <string>
+#include <algorithm>
 #include <vector>
 
-#include "common/logging.h"
+#include "common/status.h"
+#include "gutil/port.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/mem_pool.h"
 #include "util/coding.h"
 #include "util/faststring.h"
 #include "util/slice.h"
@@ -73,13 +71,16 @@ Status BinaryPrefixPageBuilder::add(const uint8_t* vals, size_t* add_count) {
             }
         }
         int non_share_len = entry_len - share_len;
+        // This may need a large memory, should return error if could not allocated
+        // successfully, to avoid BE OOM.
+        RETURN_IF_CATCH_EXCEPTION({
+            put_varint32(&_buffer, share_len);
+            put_varint32(&_buffer, non_share_len);
+            _buffer.append(entry + share_len, non_share_len);
 
-        put_varint32(&_buffer, share_len);
-        put_varint32(&_buffer, non_share_len);
-        _buffer.append(entry + share_len, non_share_len);
-
-        _last_entry.clear();
-        _last_entry.append(entry, entry_len);
+            _last_entry.clear();
+            _last_entry.append(entry, entry_len);
+        });
 
         ++_count;
     }
@@ -87,18 +88,21 @@ Status BinaryPrefixPageBuilder::add(const uint8_t* vals, size_t* add_count) {
     return Status::OK();
 }
 
-OwnedSlice BinaryPrefixPageBuilder::finish() {
+Status BinaryPrefixPageBuilder::finish(OwnedSlice* slice) {
     DCHECK(!_finished);
     _finished = true;
-    put_fixed32_le(&_buffer, (uint32_t)_count);
-    uint8_t restart_point_internal = RESTART_POINT_INTERVAL;
-    _buffer.append(&restart_point_internal, 1);
-    auto restart_point_size = _restart_points_offset.size();
-    for (uint32_t i = 0; i < restart_point_size; ++i) {
-        put_fixed32_le(&_buffer, _restart_points_offset[i]);
-    }
-    put_fixed32_le(&_buffer, restart_point_size);
-    return _buffer.build();
+    RETURN_IF_CATCH_EXCEPTION({
+        put_fixed32_le(&_buffer, (uint32_t)_count);
+        uint8_t restart_point_internal = RESTART_POINT_INTERVAL;
+        _buffer.append(&restart_point_internal, 1);
+        auto restart_point_size = _restart_points_offset.size();
+        for (uint32_t i = 0; i < restart_point_size; ++i) {
+            put_fixed32_le(&_buffer, _restart_points_offset[i]);
+        }
+        put_fixed32_le(&_buffer, restart_point_size);
+        *slice = _buffer.build();
+    });
+    return Status::OK();
 }
 
 const uint8_t* BinaryPrefixPageDecoder::_decode_value_lengths(const uint8_t* ptr, uint32_t* shared,
@@ -117,14 +121,14 @@ const uint8_t* BinaryPrefixPageDecoder::_decode_value_lengths(const uint8_t* ptr
 
 Status BinaryPrefixPageDecoder::_read_next_value() {
     if (_cur_pos >= _num_values) {
-        return Status::NotFound("no more value to read");
+        return Status::EndOfFile("no more value to read");
     }
     uint32_t shared_len;
     uint32_t non_shared_len;
     auto data_ptr = _decode_value_lengths(_next_ptr, &shared_len, &non_shared_len);
     if (data_ptr == nullptr) {
-        return Status::Corruption(
-                strings::Substitute("Failed to decode value at position $0", _cur_pos));
+        DCHECK(false) << "[BinaryPrefixPageDecoder::_read_next_value] corruption!";
+        return Status::Corruption("Failed to decode value at position {}", _cur_pos);
     }
     _current_value.resize(shared_len);
     _current_value.append(data_ptr, non_shared_len);
@@ -204,73 +208,33 @@ Status BinaryPrefixPageDecoder::seek_at_or_after_value(const void* value, bool* 
             return Status::OK();
         }
         _cur_pos++;
-        RETURN_IF_ERROR(_read_next_value());
-    }
-}
-
-Status BinaryPrefixPageDecoder::_read_next_value_to_output(Slice prev, MemPool* mem_pool,
-                                                           Slice* output) {
-    if (_cur_pos >= _num_values) {
-        return Status::NotFound("no more value to read");
-    }
-    uint32_t shared_len;
-    uint32_t non_shared_len;
-    auto data_ptr = _decode_value_lengths(_next_ptr, &shared_len, &non_shared_len);
-    if (data_ptr == nullptr) {
-        return Status::Corruption(
-                strings::Substitute("Failed to decode value at position $0", _cur_pos));
-    }
-
-    output->size = shared_len + non_shared_len;
-    if (output->size > 0) {
-        output->data = (char*)mem_pool->allocate(output->size);
-        memcpy(output->data, prev.data, shared_len);
-        memcpy(output->data + shared_len, data_ptr, non_shared_len);
-    }
-
-    _next_ptr = data_ptr + non_shared_len;
-    return Status::OK();
-}
-
-Status BinaryPrefixPageDecoder::_copy_current_to_output(MemPool* mem_pool, Slice* output) {
-    output->size = _current_value.size();
-    if (output->size > 0) {
-        output->data = (char*)mem_pool->allocate(output->size);
-        if (output->data == nullptr) {
-            return Status::MemoryAllocFailed(
-                    strings::Substitute("failed to allocate $0 bytes", output->size));
+        auto st = _read_next_value();
+        if (st.is<ErrorCode::END_OF_FILE>()) {
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("all value small than the value");
         }
-        memcpy(output->data, _current_value.data(), output->size);
+        if (!st.ok()) {
+            return st;
+        }
     }
-    return Status::OK();
 }
 
-Status BinaryPrefixPageDecoder::next_batch(size_t* n, ColumnBlockView* dst) {
+Status BinaryPrefixPageDecoder::next_batch(size_t* n, vectorized::MutableColumnPtr& dst) {
     DCHECK(_parsed);
     if (PREDICT_FALSE(*n == 0 || _cur_pos >= _num_values)) {
         *n = 0;
         return Status::OK();
     }
-    size_t i = 0;
     size_t max_fetch = std::min(*n, static_cast<size_t>(_num_values - _cur_pos));
-    auto out = reinterpret_cast<Slice*>(dst->data());
-    auto prev = out;
 
-    // first copy the current value to output
-    RETURN_IF_ERROR(_copy_current_to_output(dst->pool(), out));
-    i++;
-    out++;
-
-    // read and copy remaining values
-    for (; i < max_fetch; ++i) {
+    // read and copy values
+    for (size_t i = 0; i < max_fetch; ++i) {
+        dst->insert_data((char*)(_current_value.data()), _current_value.size());
         _cur_pos++;
-        RETURN_IF_ERROR(_read_next_value_to_output(prev[i - 1], dst->pool(), out));
-        out++;
+        // reach the end of the page, should not read the next value
+        if (_cur_pos < _num_values) {
+            RETURN_IF_ERROR(_read_next_value());
+        }
     }
-
-    //must update _current_value
-    _current_value.clear();
-    _current_value.assign_copy((uint8_t*)prev[i - 1].data, prev[i - 1].size);
 
     *n = max_fetch;
     return Status::OK();

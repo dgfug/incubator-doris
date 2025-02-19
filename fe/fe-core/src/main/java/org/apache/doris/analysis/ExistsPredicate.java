@@ -18,8 +18,6 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.thrift.TExprNode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Preconditions;
 
@@ -27,11 +25,11 @@ import com.google.common.base.Preconditions;
  * Class representing a [NOT] EXISTS predicate.
  */
 public class ExistsPredicate extends Predicate {
-    private static final Logger LOG = LoggerFactory.getLogger(
-        ExistsPredicate.class);
     private boolean notExists = false;
 
-    public boolean isNotExists() { return notExists; }
+    public boolean isNotExists() {
+        return notExists;
+    }
 
     public ExistsPredicate(Subquery subquery, boolean notExists) {
         Preconditions.checkNotNull(subquery);
@@ -56,8 +54,11 @@ public class ExistsPredicate extends Predicate {
     }
 
     @Override
-    public Expr clone() { return new ExistsPredicate(this); }
+    public Expr clone() {
+        return new ExistsPredicate(this);
+    }
 
+    @Override
     public String toSqlImpl() {
         StringBuilder strBuilder = new StringBuilder();
         if (notExists) {
@@ -70,8 +71,24 @@ public class ExistsPredicate extends Predicate {
     }
 
     @Override
+    public String toDigestImpl() {
+        StringBuilder strBuilder = new StringBuilder();
+        if (notExists) {
+            strBuilder.append("NOT ");
+
+        }
+        strBuilder.append("EXISTS ");
+        strBuilder.append(getChild(0).toDigest());
+        return strBuilder.toString();
+    }
+
+    @Override
     public int hashCode() {
         return 31 * super.hashCode() + Boolean.hashCode(notExists);
     }
-}
 
+    @Override
+    public boolean supportSerializable() {
+        return false;
+    }
+}

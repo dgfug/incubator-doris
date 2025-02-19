@@ -15,36 +15,45 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_FRAME_OF_REFERENCE_CODING_H
-#define DORIS_FRAME_OF_REFERENCE_CODING_H
+#pragma once
+
+#include <stdint.h>
 
 #include <cstdlib>
-#include <iostream>
-#include <limits>
+#include <vector>
 
 #include "olap/olap_common.h"
 #include "olap/uint24.h"
-#include "util/bit_stream_utils.h"
-#include "util/bit_stream_utils.inline.h"
 #include "util/faststring.h"
 
 namespace doris {
 
-static inline uint8_t bits_less_than_64(const uint64_t v) {
-    return v == 0 ? 0 : 64 - __builtin_clzll(v);
+inline uint8_t leading_zeroes(const uint64_t v) {
+    if (v == 0) {
+        return 64;
+    }
+    return __builtin_clzll(v);
+}
+
+inline uint8_t bits_less_than_64(const uint64_t v) {
+    return 64 - leading_zeroes(v);
 }
 
 // See https://stackoverflow.com/questions/28423405/counting-the-number-of-leading-zeros-in-a-128-bit-integer
-static inline uint8_t bits_may_more_than_64(const uint128_t v) {
+inline uint8_t bits_may_more_than_64(const uint128_t v) {
+    // See https://stackoverflow.com/questions/49580083/builtin-clz-returns-incorrect-value-for-input-zero
+    if (v == 0) {
+        return 0;
+    }
     uint64_t hi = v >> 64;
     uint64_t lo = v;
-    int z[3] = {__builtin_clzll(hi), __builtin_clzll(lo) + 64, 128};
+    int z[3] = {leading_zeroes(hi), leading_zeroes(lo) + 64, 128};
     int idx = !hi + ((!lo) & (!hi));
     return 128 - z[idx];
 }
 
 template <typename T>
-static inline uint8_t bits(const T v) {
+uint8_t bits(const T v) {
     if (sizeof(T) <= 8) {
         return bits_less_than_64(v);
     } else {
@@ -119,7 +128,7 @@ private:
     static const uint8_t FRAME_VALUE_NUM = 128;
     T _buffered_values[FRAME_VALUE_NUM];
 
-    faststring* _buffer;
+    faststring* _buffer = nullptr;
     std::vector<uint8_t> _storage_formats;
     std::vector<uint8_t> _bit_widths;
 };
@@ -151,7 +160,7 @@ public:
 private:
     void bit_unpack(const uint8_t* input, uint8_t in_num, int bit_width, T* output);
 
-    inline uint32_t frame_size(uint32_t frame_index) {
+    uint32_t frame_size(uint32_t frame_index) {
         return (frame_index == _frame_count - 1) ? _last_frame_size : _max_frame_size;
     }
 
@@ -188,5 +197,3 @@ private:
     std::vector<T> _out_buffer; // store values of decoded frame
 };
 } // namespace doris
-
-#endif //DORIS_FRAME_OF_REFERENCE_CODING_H

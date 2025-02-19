@@ -29,6 +29,13 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Map;
 
+/**
+ * DatabaseProperty contains additional information about a database.
+ *
+ * Different properties are recognized by prefix, such as `iceberg`
+ * If there is different type property is added, write a method,
+ * such as `checkAndBuildIcebergProperty` to check and build it.
+ */
 public class DatabaseProperty implements Writable {
 
     @SerializedName(value = "properties")
@@ -36,6 +43,10 @@ public class DatabaseProperty implements Writable {
 
     public DatabaseProperty() {
 
+    }
+
+    public DatabaseProperty(Map<String, String> properties) {
+        this.properties = properties;
     }
 
     public void put(String key, String val) {
@@ -50,6 +61,19 @@ public class DatabaseProperty implements Writable {
         return properties.getOrDefault(key, defaultVal);
     }
 
+    public Map<String, String> getProperties() {
+        return properties;
+    }
+
+    public BinlogConfig getBinlogConfig() {
+        BinlogConfig binlogConfig = new BinlogConfig();
+        binlogConfig.mergeFromProperties(properties);
+        return binlogConfig;
+    }
+
+    public void updateProperties(Map<String, String> newProperties) {
+        properties.putAll(newProperties);
+    }
 
     @Override
     public void write(DataOutput out) throws IOException {

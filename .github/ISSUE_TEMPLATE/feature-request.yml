@@ -17,22 +17,24 @@
 name: Doris feature request
 description: Suggest an idea for Apache Doris
 title: "[Feature] "
-labels: [ "kind/feature" ]
+labels: ["kind/feature"]
 body:
   - type: markdown
     attributes:
       value: |
         Thank you very much for your good ideas and suggestions for Doris
 
+        Please help sync to the [Dev Mail List](mailto:dev@doris.apache.org). You will get FASTER help！[How to subscribe](mailto:dev-subscribe@doris.apache.org)
+
   - type: checkboxes
     attributes:
       label: Search before asking
       description: >
-        Please make sure to search in the [issues](https://github.com/apache/incubator-doris/issues?q=is%3Aissue) first to see
+        Please make sure to search in the [issues](https://github.com/apache/doris/issues?q=is%3Aissue) first to see
         whether the same issue was reported already.
       options:
         - label: >
-            I had searched in the [issues](https://github.com/apache/incubator-doris/issues?q=is%3Aissue) and found no similar
+            I had searched in the [issues](https://github.com/apache/doris/issues?q=is%3Aissue) and found no similar
             issues.
           required: true
 

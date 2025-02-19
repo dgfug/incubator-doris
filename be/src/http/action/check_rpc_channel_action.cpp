@@ -17,18 +17,29 @@
 
 #include "http/action/check_rpc_channel_action.h"
 
-#include <fmt/core.h>
+#include <brpc/controller.h>
+#include <fmt/format.h>
+#include <gen_cpp/internal_service.pb.h>
+#include <gen_cpp/types.pb.h>
+#include <glog/logging.h>
+#include <stdint.h>
 
-#include "gen_cpp/internal_service.pb.h"
+#include <exception>
+#include <memory>
+#include <string>
+
 #include "http/http_channel.h"
 #include "http/http_request.h"
+#include "http/http_status.h"
 #include "runtime/exec_env.h"
-#include "service/brpc.h"
-#include "util/brpc_stub_cache.h"
+#include "util/brpc_client_cache.h"
 #include "util/md5.h"
 
 namespace doris {
-CheckRPCChannelAction::CheckRPCChannelAction(ExecEnv* exec_env) : _exec_env(exec_env) {}
+CheckRPCChannelAction::CheckRPCChannelAction(ExecEnv* exec_env, TPrivilegeHier::type hier,
+                                             TPrivilegeType::type type)
+        : HttpHandlerWithAuth(exec_env, hier, type) {}
+
 void CheckRPCChannelAction::handle(HttpRequest* req) {
     std::string req_ip = req->param("ip");
     std::string req_port = req->param("port");
@@ -54,8 +65,8 @@ void CheckRPCChannelAction::handle(HttpRequest* req) {
             return;
         }
     } catch (const std::exception& e) {
-        std::string err = fmt::format("invalid argument. port:{0}, payload_size: {1}", req_port,
-                                      req_payload_size);
+        std::string err = fmt::format("invalid argument. port: {0}, payload_size: {1}, reason: {}",
+                                      req_port, req_payload_size, e.what());
         LOG(WARNING) << err;
         HttpChannel::send_reply(req, HttpStatus::INTERNAL_SERVER_ERROR, err);
         return;
@@ -71,7 +82,7 @@ void CheckRPCChannelAction::handle(HttpRequest* req) {
     digest.digest();
     request.set_md5(digest.hex());
     std::shared_ptr<PBackendService_Stub> stub(
-            _exec_env->brpc_stub_cache()->get_stub(req_ip, port));
+            _exec_env->brpc_internal_client_cache()->get_client(req_ip, port));
     if (!stub) {
         HttpChannel::send_reply(
                 req, HttpStatus::INTERNAL_SERVER_ERROR,
@@ -87,8 +98,7 @@ void CheckRPCChannelAction::handle(HttpRequest* req) {
         return;
     }
     if (response.status().status_code() == 0) {
-        std::string err =
-                fmt::format("open brpc connection to {0}:{1} succcess.", req_ip, req_port);
+        std::string err = fmt::format("open brpc connection to {0}:{1} success.", req_ip, req_port);
         LOG(WARNING) << err;
         HttpChannel::send_reply(req, HttpStatus::OK, err);
     } else {

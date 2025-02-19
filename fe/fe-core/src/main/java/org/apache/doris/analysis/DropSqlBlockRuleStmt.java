@@ -17,18 +17,22 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-import org.apache.parquet.Strings;
+import com.google.common.base.Joiner;
+import lombok.Getter;
 
 import java.util.List;
 
-public class DropSqlBlockRuleStmt extends DdlStmt {
+@Getter
+public class DropSqlBlockRuleStmt extends DdlStmt implements NotFallbackInParser {
+
+    private boolean ifExists;
 
     private List<String> ruleNames;
 
@@ -36,23 +40,25 @@ public class DropSqlBlockRuleStmt extends DdlStmt {
     public void analyze(Analyzer analyzer) throws UserException {
         super.analyze(analyzer);
         // check auth
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
     }
 
-    public DropSqlBlockRuleStmt(List<String> ruleNames) {
+    public DropSqlBlockRuleStmt(boolean ifExists, List<String> ruleNames) {
+        this.ifExists = ifExists;
         this.ruleNames = ruleNames;
-    }
-
-    public List<String> getRuleNames() {
-        return ruleNames;
     }
 
     @Override
     public String toSql() {
         StringBuilder sb = new StringBuilder();
-        sb.append("DROP SQL_BLOCK_RULE ").append(Strings.join(ruleNames, ","));
+        sb.append("DROP SQL_BLOCK_RULE ").append(Joiner.on(",").join(ruleNames));
         return sb.toString();
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.DROP;
     }
 }

@@ -18,6 +18,7 @@
 package org.apache.doris.planner;
 
 import org.apache.doris.qe.ConnectContext;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -36,7 +37,7 @@ import org.apache.logging.log4j.Logger;
  * and result in both "broadcastCost" and "partitionCost" be 0. And this will lead to a SHUFFLE join.
  */
 public class JoinCostEvaluation {
-    private final static Logger LOG = LogManager.getLogger(JoinCostEvaluation.class);
+    private static final Logger LOG = LogManager.getLogger(JoinCostEvaluation.class);
 
     private final long rhsTreeCardinality;
     private final float rhsTreeAvgRowSize;
@@ -74,10 +75,10 @@ public class JoinCostEvaluation {
         }
         if (LOG.isDebugEnabled()) {
             LOG.debug(nodeOverview);
-            LOG.debug("broadcast: cost=" + Long.toString(broadcastCost));
-            LOG.debug("rhs card=" + Long.toString(rhsTreeCardinality)
-                    + " rhs row_size=" + Float.toString(rhsTreeAvgRowSize)
-                    + " lhs nodes=" + Integer.toString(lhsTreeNumNodes));
+            LOG.debug("broadcast: cost=" + broadcastCost);
+            LOG.debug("rhs card=" + rhsTreeCardinality
+                    + " rhs row_size=" + rhsTreeAvgRowSize
+                    + " lhs nodes=" + lhsTreeNumNodes);
         }
     }
 
@@ -91,12 +92,10 @@ public class JoinCostEvaluation {
                     (double) lhsTreeCardinality * lhsTreeAvgRowSize + (double) rhsTreeCardinality * rhsTreeAvgRowSize);
         }
         if (LOG.isDebugEnabled()) {
-            LOG.debug(nodeOverview);
-            LOG.debug("partition: cost=" + Long.toString(partitionCost));
-            LOG.debug("lhs card=" + Long.toString(lhsTreeCardinality) + " row_size="
-                    + Float.toString(lhsTreeAvgRowSize));
-            LOG.debug("rhs card=" + Long.toString(rhsTreeCardinality) + " row_size="
-                    + Float.toString(rhsTreeAvgRowSize));
+            LOG.debug("nodeOverview: {}", nodeOverview);
+            LOG.debug("partition: cost={} ", partitionCost);
+            LOG.debug("lhs card={} row_size={}", lhsTreeCardinality, lhsTreeAvgRowSize);
+            LOG.debug("rhs card={} row_size={}", rhsTreeCardinality, rhsTreeAvgRowSize);
         }
     }
 
@@ -144,7 +143,7 @@ public class JoinCostEvaluation {
     public long constructHashTableSpace() {
         double bucketPointerSpace = ((double) rhsTreeCardinality / 0.75) * 8;
         double nodeArrayLen =
-                Math.pow(1.5, (int) ((Math.log((double) rhsTreeCardinality/4096) / Math.log(1.5)) + 1)) * 4096;
+                Math.pow(1.5, (int) ((Math.log((double) rhsTreeCardinality / 4096) / Math.log(1.5)) + 1)) * 4096;
         double nodeOverheadSpace = nodeArrayLen * 16;
         double nodeTuplePointerSpace = nodeArrayLen * rhsTreeTupleIdNum * 8;
         return Math.round((bucketPointerSpace + (double) rhsTreeCardinality * rhsTreeAvgRowSize

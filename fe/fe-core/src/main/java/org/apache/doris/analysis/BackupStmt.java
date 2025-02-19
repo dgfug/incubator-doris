@@ -27,9 +27,9 @@ import com.google.common.collect.Maps;
 
 import java.util.Map;
 
-public class BackupStmt extends AbstractBackupStmt {
-    private final static String PROP_TYPE = "type";
-    public final static String PROP_CONTENT = "content";
+public class BackupStmt extends AbstractBackupStmt implements NotFallbackInParser {
+    private static final String PROP_TYPE = "type";
+    public static final String PROP_CONTENT = "content";
 
     public enum BackupType {
         INCREMENTAL, FULL
@@ -127,4 +127,10 @@ public class BackupStmt extends AbstractBackupStmt {
         sb.append("\n)");
         return sb.toString();
     }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.BACKUP;
+    }
+
 }

@@ -17,11 +17,9 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
@@ -29,7 +27,7 @@ import com.google.common.collect.Lists;
 
 import java.util.List;
 
-public class SetUserPropertyStmt extends DdlStmt {
+public class SetUserPropertyStmt extends DdlStmt implements NotFallbackInParser {
     private String user;
     private final List<SetVar> propertyList;
 
@@ -46,7 +44,7 @@ public class SetUserPropertyStmt extends DdlStmt {
     public List<Pair<String, String>> getPropertyPairList() {
         List<Pair<String, String>> list = Lists.newArrayList();
         for (SetVar var : propertyList) {
-            list.add(Pair.create(((SetUserPropertyVar) var).getPropertyKey(),
+            list.add(Pair.of(((SetUserPropertyVar) var).getPropertyKey(),
                                  ((SetUserPropertyVar) var).getPropertyValue()));
         }
         return list;
@@ -59,11 +57,6 @@ public class SetUserPropertyStmt extends DdlStmt {
             // If param 'user' is not set, use the login user name.
             // The login user name is full-qualified with cluster name.
             user = ConnectContext.get().getQualifiedUser();
-        } else {
-            // If param 'user' is set, check if it need to be full-qualified
-            if (!user.equals(PaloAuth.ROOT_USER) && !user.equals(PaloAuth.ADMIN_USER)) {
-                user = ClusterNamespace.getFullName(getClusterName(), user);
-            }
         }
 
         if (propertyList == null || propertyList.isEmpty()) {
@@ -98,5 +91,9 @@ public class SetUserPropertyStmt extends DdlStmt {
     public String toString() {
         return toSql();
     }
-}
 
+    @Override
+    public StmtType stmtType() {
+        return StmtType.SET;
+    }
+}

@@ -21,23 +21,47 @@ import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.thrift.TInvertedIndexFileStorageFormat;
 
 import com.google.common.base.Strings;
+import com.google.common.collect.Lists;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeSet;
 
 public class IndexDef {
     private String indexName;
+    private boolean ifNotExists;
     private List<String> columns;
+    // add the column name of olapTable column into caseSensitivityColumns
+    // instead of the column name which from sql_parser analyze
+    private List<String> caseSensitivityColumns = Lists.newArrayList();
     private IndexType indexType;
     private String comment;
+    private Map<String, String> properties;
+    private boolean isBuildDeferred = false;
+    private PartitionNames partitionNames;
+    private List<Integer> columnUniqueIds = Lists.newArrayList();
+    public static final int MIN_NGRAM_SIZE = 1;
+    public static final int MAX_NGRAM_SIZE = 255;
+    public static final int MIN_BF_SIZE = 64;
+    public static final int MAX_BF_SIZE = 65535;
 
-    public IndexDef(String indexName, List<String> columns, IndexType indexType, String comment) {
+    public static final String NGRAM_SIZE_KEY = "gram_size";
+    public static final String NGRAM_BF_SIZE_KEY = "bf_size";
+    public static final String DEFAULT_NGRAM_SIZE = "2";
+    public static final String DEFAULT_NGRAM_BF_SIZE = "256";
+
+
+    public IndexDef(String indexName, boolean ifNotExists, List<String> columns, IndexType indexType,
+                    Map<String, String> properties, String comment) {
         this.indexName = indexName;
+        this.ifNotExists = ifNotExists;
         this.columns = columns;
         if (indexType == null) {
-            this.indexType = IndexType.BITMAP;
+            this.indexType = IndexType.INVERTED;
         } else {
             this.indexType = indexType;
         }
@@ -46,12 +70,39 @@ public class IndexDef {
         } else {
             this.comment = comment;
         }
+        if (properties == null) {
+            this.properties = new HashMap<>();
+        } else {
+            this.properties = properties;
+        }
+        if (indexType == IndexType.NGRAM_BF) {
+            this.properties.putIfAbsent(NGRAM_SIZE_KEY, DEFAULT_NGRAM_SIZE);
+            this.properties.putIfAbsent(NGRAM_BF_SIZE_KEY, DEFAULT_NGRAM_BF_SIZE);
+        }
+    }
+
+    public IndexDef(String indexName, PartitionNames partitionNames, boolean isBuildDeferred) {
+        this.indexName = indexName;
+        this.indexType = IndexType.INVERTED;
+        this.partitionNames = partitionNames;
+        this.isBuildDeferred = isBuildDeferred;
     }
 
     public void analyze() throws AnalysisException {
-        if (indexType == IndexDef.IndexType.BITMAP) {
+        if (isBuildDeferred && indexType == IndexDef.IndexType.INVERTED) {
+            if (Strings.isNullOrEmpty(indexName)) {
+                throw new AnalysisException("index name cannot be blank.");
+            }
+            if (indexName.length() > 128) {
+                throw new AnalysisException("index name too long, the index name length at most is 128.");
+            }
+            return;
+        }
+
+        if (indexType == IndexDef.IndexType.BITMAP
+                || indexType == IndexDef.IndexType.INVERTED) {
             if (columns == null || columns.size() != 1) {
-                throw new AnalysisException("bitmap index can only apply to a single column.");
+                throw new AnalysisException(indexType.toString() + " index can only apply to a single column.");
             }
             if (Strings.isNullOrEmpty(indexName)) {
                 throw new AnalysisException("index name cannot be blank.");
@@ -73,23 +124,38 @@ public class IndexDef {
 
     public String toSql(String tableName) {
         StringBuilder sb = new StringBuilder("INDEX ");
-        sb.append(indexName);
+        sb.append("`" + indexName + "`");
         if (tableName != null && !tableName.isEmpty()) {
             sb.append(" ON ").append(tableName);
         }
-        sb.append(" (");
-        boolean first = true;
-        for (String col : columns) {
-            if (first) {
-                first = false;
-            } else {
-                sb.append(",");
+        if (columns != null && columns.size() > 0) {
+            sb.append(" (");
+            boolean first = true;
+            for (String col : columns) {
+                if (first) {
+                    first = false;
+                } else {
+                    sb.append(",");
+                }
+                sb.append("`" + col + "`");
             }
-            sb.append("`" + col + "`");
+            sb.append(")");
         }
-        sb.append(")");
         if (indexType != null) {
             sb.append(" USING ").append(indexType.toString());
+        }
+        if (properties != null && properties.size() > 0) {
+            sb.append(" PROPERTIES(");
+            boolean first = true;
+            for (Map.Entry<String, String> e : properties.entrySet()) {
+                if (first) {
+                    first = false;
+                } else {
+                    sb.append(", ");
+                }
+                sb.append("\"").append(e.getKey()).append("\"=").append("\"").append(e.getValue()).append("\"");
+            }
+            sb.append(")");
         }
         if (comment != null) {
             sb.append(" COMMENT '" + comment + "'");
@@ -107,6 +173,9 @@ public class IndexDef {
     }
 
     public List<String> getColumns() {
+        if (caseSensitivityColumns.size() > 0) {
+            return caseSensitivityColumns;
+        }
         return columns;
     }
 
@@ -114,38 +183,110 @@ public class IndexDef {
         return indexType;
     }
 
+    public Map<String, String> getProperties() {
+        return properties;
+    }
+
     public String getComment() {
         return comment;
     }
 
-    public enum IndexType {
-        BITMAP,
-
+    public boolean isSetIfNotExists() {
+        return ifNotExists;
     }
 
-    public void checkColumn(Column column, KeysType keysType) throws AnalysisException {
-        if (indexType == IndexType.BITMAP) {
+    public boolean isBuildDeferred() {
+        return isBuildDeferred;
+    }
+
+    public List<String> getPartitionNames() {
+        return partitionNames == null ? Lists.newArrayList() : partitionNames.getPartitionNames();
+    }
+
+    public List<Integer> getColumnUniqueIds() {
+        return columnUniqueIds;
+    }
+
+    public enum IndexType {
+        BITMAP,
+        INVERTED,
+        BLOOMFILTER,
+        NGRAM_BF
+    }
+
+    public boolean isInvertedIndex() {
+        return (this.indexType == IndexType.INVERTED);
+    }
+
+    public void checkColumn(Column column, KeysType keysType, boolean enableUniqueKeyMergeOnWrite,
+            TInvertedIndexFileStorageFormat invertedIndexFileStorageFormat,
+            boolean disableInvertedIndexV1ForVariant) throws AnalysisException {
+        if (indexType == IndexType.BITMAP || indexType == IndexType.INVERTED || indexType == IndexType.BLOOMFILTER
+                || indexType == IndexType.NGRAM_BF) {
             String indexColName = column.getName();
+            caseSensitivityColumns.add(indexColName);
             PrimitiveType colType = column.getDataType();
-            if (!(colType.isDateType() || colType.isDecimalV2Type() || colType.isFixedPointType() ||
-                          colType.isStringType() || colType == PrimitiveType.BOOLEAN)) {
-                throw new AnalysisException(colType + " is not supported in bitmap index. "
-                        + "invalid column: " + indexColName);
-            } else if ((keysType == KeysType.AGG_KEYS && !column.isKey())) {
-                throw new AnalysisException(
-                        "BITMAP index only used in columns of DUP_KEYS/UNIQUE_KEYS table or key columns of"
-                                + " AGG_KEYS table. invalid column: " + indexColName);
+            if (!(colType.isDateType() || colType.isDecimalV2Type() || colType.isDecimalV3Type()
+                    || colType.isFixedPointType() || colType.isStringType() || colType == PrimitiveType.BOOLEAN
+                    || colType.isVariantType() || colType.isIPType() || colType.isArrayType())) {
+                throw new AnalysisException(colType + " is not supported in " + indexType.toString() + " index. "
+                        + "invalid index: " + indexName);
+            }
+
+            // In inverted index format v1, each subcolumn of a variant has its own index file, leading to high IOPS.
+            // when the subcolumn type changes, it may result in missing files, causing link file failure.
+            if (colType.isVariantType() && disableInvertedIndexV1ForVariant) {
+                throw new AnalysisException(colType + " is not supported in inverted index format V1,"
+                        + "Please set properties(\"inverted_index_storage_format\"= \"v2\"),"
+                        + "or upgrade to a newer version");
+            }
+            if (!column.isKey()) {
+                if (keysType == KeysType.AGG_KEYS) {
+                    throw new AnalysisException("index should only be used in columns of DUP_KEYS/UNIQUE_KEYS table"
+                        + " or key columns of AGG_KEYS table. invalid index: " + indexName);
+                } else if (keysType == KeysType.UNIQUE_KEYS && !enableUniqueKeyMergeOnWrite
+                        && indexType == IndexType.INVERTED && properties != null
+                        && properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY)) {
+                    throw new AnalysisException("INVERTED index with parser can NOT be used in value columns of"
+                        + " UNIQUE_KEYS table with merge_on_write disable. invalid index: " + indexName);
+                }
+            }
+
+            if (indexType == IndexType.INVERTED) {
+                InvertedIndexUtil.checkInvertedIndexParser(indexColName, colType, properties,
+                        invertedIndexFileStorageFormat);
+            } else if (indexType == IndexType.NGRAM_BF) {
+                if (colType != PrimitiveType.CHAR && colType != PrimitiveType.VARCHAR
+                        && colType != PrimitiveType.STRING) {
+                    throw new AnalysisException(colType + " is not supported in ngram_bf index. "
+                                                    + "invalid column: " + indexColName);
+                }
+                if (properties.size() != 2) {
+                    throw new AnalysisException("ngram_bf index should have gram_size and bf_size properties");
+                }
+
+                parseAndValidateProperty(properties, NGRAM_SIZE_KEY, MIN_NGRAM_SIZE, MAX_NGRAM_SIZE);
+                parseAndValidateProperty(properties, NGRAM_BF_SIZE_KEY, MIN_BF_SIZE, MAX_BF_SIZE);
             }
         } else {
             throw new AnalysisException("Unsupported index type: " + indexType);
         }
     }
 
-    public void checkColumns(List<Column> columns, KeysType keysType) throws AnalysisException {
-        if (indexType == IndexType.BITMAP) {
-            for (Column col : columns) {
-                checkColumn(col, keysType);
+    public static void parseAndValidateProperty(Map<String, String> properties, String key, int minValue, int maxValue)
+            throws AnalysisException {
+        String valueStr = properties.get(key);
+        if (valueStr == null) {
+            throw new AnalysisException("Property '" + key + "' is missing.");
+        }
+        try {
+            int value = Integer.parseInt(valueStr);
+            if (value < minValue || value > maxValue) {
+                throw new AnalysisException("'" + key + "' should be an integer between "
+                                                + minValue + " and " + maxValue + ".");
             }
+        } catch (NumberFormatException e) {
+            throw new AnalysisException("Invalid value for '" + key + "': " + valueStr, e);
         }
     }
 }

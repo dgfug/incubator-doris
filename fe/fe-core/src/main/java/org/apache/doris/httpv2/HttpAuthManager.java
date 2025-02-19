@@ -22,7 +22,6 @@ import org.apache.doris.analysis.UserIdentity;
 import com.google.common.base.Strings;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -62,18 +61,22 @@ public final class HttpAuthManager {
         for (String sessionId : sessionIds) {
             SessionValue sv = authSessions.getIfPresent(sessionId);
             if (sv != null) {
-                LOG.debug("get session value {} by session id: {}, left size: {}",
-                        sv == null ? null : sv.currentUser, sessionId, authSessions.size());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("get session value {} by session id: {}, left size: {}",
+                            sv == null ? null : sv.currentUser, sessionId, authSessions.size());
+                }
                 return sv;
             }
         }
         return null;
     }
 
-    public void removeSession(String sessionId){
+    public void removeSession(String sessionId) {
         if (!Strings.isNullOrEmpty(sessionId)) {
             authSessions.invalidate(sessionId);
-            LOG.debug("remove session id: {}, left size: {}", sessionId, authSessions.size());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("remove session id: {}, left size: {}", sessionId, authSessions.size());
+            }
         }
     }
 
@@ -85,4 +88,3 @@ public final class HttpAuthManager {
         return authSessions;
     }
 }
-

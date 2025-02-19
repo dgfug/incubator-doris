@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_HTTP_HEADERS_H
-#define DORIS_BE_SRC_COMMON_UTIL_HTTP_HEADERS_H
+#pragma once
 
 #include <string>
 
@@ -98,9 +97,8 @@ public:
     static const char* WEBSOCKET_PROTOCOL;
     static const char* WWW_AUTHENTICATE;
 
-    static const std::string JsonType;
+    static const std::string JSON_TYPE;
+    static const std::string AUTH_TOKEN;
 };
 
 } // namespace doris
-
-#endif

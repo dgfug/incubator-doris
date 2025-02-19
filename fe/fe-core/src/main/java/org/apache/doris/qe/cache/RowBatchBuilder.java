@@ -21,11 +21,12 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.proto.InternalService;
+import org.apache.doris.proto.Types.PUniqueId;
 import org.apache.doris.qe.RowBatch;
+import org.apache.doris.thrift.TResultBatch;
 
 import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -54,6 +55,10 @@ public class RowBatchBuilder {
 
     public int getRowSize() {
         return rowSize;
+    }
+
+    public int getDataSize() {
+        return dataSize;
     }
 
     public RowBatchBuilder(CacheAnalyzer.CacheMode model) {
@@ -92,18 +97,31 @@ public class RowBatchBuilder {
 
     public void copyRowData(RowBatch rowBatch) {
         batchSize++;
-        rowSize += rowBatch.getBatch().getRowsSize();
-        for (ByteBuffer buf : rowBatch.getBatch().getRows()) {
-            byte[] bytes = Arrays.copyOfRange(buf.array(), buf.position(), buf.limit());
-            dataSize += bytes.length;
-            rowList.add(bytes);
+        TResultBatch resultBatch = rowBatch.getBatch();
+        // for empty result set, the resultBatch will be null
+        rowSize += resultBatch == null ? 0 : resultBatch.getRowsSize();
+        if (resultBatch != null) {
+            for (ByteBuffer buf : rowBatch.getBatch().getRows()) {
+                byte[] bytes = Arrays.copyOfRange(buf.array(), buf.position(), buf.limit());
+                dataSize += bytes.length;
+                rowList.add(bytes);
+            }
         }
     }
 
-    public InternalService.PUpdateCacheRequest buildSqlUpdateRequest(String sql, long partitionKey, long lastVersion, long lastestTime) {
+    public void clear() {
+        rowList = Lists.newArrayList();
+        cachePartMap = new HashMap<>();
+        batchSize = 0;
+        rowSize = 0;
+        dataSize = 0;
+    }
+
+    public InternalService.PUpdateCacheRequest buildSqlUpdateRequest(
+            PUniqueId cacheKeyMd5, long partitionKey, long lastVersion, long lastestTime, long partitionNum) {
         if (updateRequest == null) {
             updateRequest = InternalService.PUpdateCacheRequest.newBuilder()
-                    .setSqlKey(CacheProxy.getMd5(sql))
+                    .setSqlKey(cacheKeyMd5)
                     .setCacheType(InternalService.CacheType.SQL_CACHE).build();
         }
         updateRequest = updateRequest.toBuilder()
@@ -112,6 +130,7 @@ public class RowBatchBuilder {
                                 .setPartitionKey(partitionKey)
                                 .setLastVersion(lastVersion)
                                 .setLastVersionTime(lastestTime)
+                                .setPartitionNum(partitionNum)
                                 .build()).setDataSize(dataSize).addAllRows(
                                 rowList.stream().map(row -> ByteString.copyFrom(row))
                                         .collect(Collectors.toList()))).build();
@@ -167,10 +186,6 @@ public class RowBatchBuilder {
             Long key = entry.getKey();
             PartitionRange.PartitionSingle partition = cachePartMap.get(key);
             partitionRowList = entry.getValue();
-            int data_size = 0;
-            for (byte[] buf : partitionRowList) {
-                data_size += buf.length;
-            }
             updateRequest = updateRequest.toBuilder()
                     .addValues(InternalService.PCacheValue.newBuilder()
                             .setParam(InternalService.PCacheParam.newBuilder()
@@ -178,10 +193,9 @@ public class RowBatchBuilder {
                                     .setLastVersion(partition.getPartition().getVisibleVersion())
                                     .setLastVersionTime(partition.getPartition().getVisibleVersionTime())
                                     .build()).setDataSize(dataSize).addAllRows(
-                                    partitionRowList.stream().map(row -> ByteString.copyFrom(row))
+                                    partitionRowList.stream().map(ByteString::copyFrom)
                                             .collect(Collectors.toList()))).build();
         }
         return updateRequest;
     }
 }
-

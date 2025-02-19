@@ -17,9 +17,9 @@
 
 package org.apache.doris.common.publish;
 
-import java.util.Collection;
-
 import org.apache.doris.system.Backend;
+
+import java.util.Collection;
 
 // Response handler contain a listener
 public class AckResponseHandler extends ResponseHandler {
@@ -30,15 +30,24 @@ public class AckResponseHandler extends ResponseHandler {
         this.listener = listener;
     }
 
+    public AckResponseHandler(Collection<Backend> nodes) {
+        super(nodes);
+        this.listener = null;
+    }
+
     @Override
     public void onResponse(Backend node) {
         super.onResponse(node);
-        listener.onResponse(node);
+        if (listener != null) {
+            listener.onResponse(node);
+        }
     }
 
     @Override
     public void onFailure(Backend node, Throwable t) {
         super.onFailure(node, t);
-        listener.onFailure(node, t);
+        if (listener != null) {
+            listener.onFailure(node, t);
+        }
     }
 }

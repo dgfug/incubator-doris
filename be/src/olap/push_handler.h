@@ -15,207 +15,146 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_PUSH_HANDLER_H
-#define DORIS_BE_SRC_OLAP_PUSH_HANDLER_H
+#pragma once
 
-#include <map>
+#include <butil/macros.h>
+#include <gen_cpp/AgentService_types.h>
+#include <gen_cpp/Exprs_types.h>
+
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "exec/base_scanner.h"
-#include "gen_cpp/AgentService_types.h"
-#include "gen_cpp/MasterService_types.h"
-#include "gen_cpp/PaloInternalService_types.h"
-#include "olap/file_helper.h"
-#include "olap/merger.h"
+#include "common/factory_creator.h"
+#include "common/object_pool.h"
+#include "common/status.h"
+#include "exec/olap_common.h"
 #include "olap/olap_common.h"
-#include "olap/row_cursor.h"
-#include "olap/rowset/rowset.h"
+#include "olap/rowset/pending_rowset_helper.h"
+#include "olap/rowset/rowset_fwd.h"
+#include "olap/tablet_fwd.h"
+#include "runtime/runtime_state.h"
+#include "vec/core/block.h"
+#include "vec/exec/format/generic_reader.h"
 
 namespace doris {
 
-class BinaryFile;
-class BinaryReader;
-class ColumnMapping;
-class RowCursor;
+class DescriptorTbl;
+class RuntimeProfile;
+class Schema;
+class TBrokerScanRange;
+class TDescriptorTable;
+class TTabletInfo;
+class StorageEngine;
 
-struct TabletVars {
-    TabletSharedPtr tablet;
-    RowsetSharedPtr rowset_to_add;
-};
+namespace vectorized {
+class GenericReader;
+class VExprContext;
+} // namespace vectorized
 
 class PushHandler {
 public:
-    typedef std::vector<ColumnMapping> SchemaMapping;
-
-    PushHandler() {}
-    ~PushHandler() {}
+    PushHandler(StorageEngine& engine) : _engine(engine) {}
+    ~PushHandler() = default;
 
     // Load local data file into specified tablet.
-    OLAPStatus process_streaming_ingestion(TabletSharedPtr tablet, const TPushReq& request,
-                                           PushType push_type,
-                                           std::vector<TTabletInfo>* tablet_info_vec);
+    Status process_streaming_ingestion(TabletSharedPtr tablet, const TPushReq& request,
+                                       PushType push_type,
+                                       std::vector<TTabletInfo>* tablet_info_vec);
 
     int64_t write_bytes() const { return _write_bytes; }
     int64_t write_rows() const { return _write_rows; }
 
 private:
-    OLAPStatus _convert_v2(TabletSharedPtr cur_tablet, TabletSharedPtr new_tablet_vec,
-                           RowsetSharedPtr* cur_rowset, RowsetSharedPtr* new_rowset);
-    // Convert local data file to internal formatted delta,
-    // return new delta's SegmentGroup
-    OLAPStatus _convert(TabletSharedPtr cur_tablet, TabletSharedPtr new_tablet_vec,
-                        RowsetSharedPtr* cur_rowset, RowsetSharedPtr* new_rowset);
+    Status _convert_v2(TabletSharedPtr cur_tablet, RowsetSharedPtr* cur_rowset,
+                       TabletSchemaSPtr tablet_schema, PushType push_type);
 
-    // Only for debug
-    std::string _debug_version_list(const Versions& versions) const;
+    Status _do_streaming_ingestion(TabletSharedPtr tablet, const TPushReq& request,
+                                   PushType push_type, std::vector<TTabletInfo>* tablet_info_vec);
 
-    void _get_tablet_infos(const std::vector<TabletVars>& tablet_infos,
-                           std::vector<TTabletInfo>* tablet_info_vec);
+    StorageEngine& _engine;
 
-    OLAPStatus _do_streaming_ingestion(TabletSharedPtr tablet, const TPushReq& request,
-                                       PushType push_type, vector<TabletVars>* tablet_vars,
-                                       std::vector<TTabletInfo>* tablet_info_vec);
-
-private:
     // mainly tablet_id, version and delta file path
     TPushReq _request;
 
+    ObjectPool _pool;
+    DescriptorTbl* _desc_tbl = nullptr;
+
     int64_t _write_bytes = 0;
     int64_t _write_rows = 0;
-    DISALLOW_COPY_AND_ASSIGN(PushHandler);
-};
-
-// package FileHandlerWithBuf to read header of dpp output file
-class BinaryFile : public FileHandlerWithBuf {
-public:
-    BinaryFile() {}
-    virtual ~BinaryFile() { close(); }
-
-    OLAPStatus init(const char* path);
-
-    size_t header_size() const { return _header.size(); }
-    size_t file_length() const { return _header.file_length(); }
-    uint32_t checksum() const { return _header.checksum(); }
-    SchemaHash schema_hash() const { return _header.message().schema_hash(); }
-
-private:
-    FileHeader<OLAPRawDeltaHeaderMessage, int32_t, FileHandlerWithBuf> _header;
-
-    DISALLOW_COPY_AND_ASSIGN(BinaryFile);
-};
-
-class IBinaryReader {
-public:
-    static IBinaryReader* create(bool need_decompress);
-    virtual ~IBinaryReader() {}
-
-    virtual OLAPStatus init(TabletSharedPtr tablet, BinaryFile* file) = 0;
-    virtual OLAPStatus finalize() = 0;
-
-    virtual OLAPStatus next(RowCursor* row) = 0;
-
-    virtual bool eof() = 0;
-
-    // call this function after finalize()
-    bool validate_checksum() { return _adler_checksum == _file->checksum(); }
-
-protected:
-    IBinaryReader()
-            : _file(NULL),
-              _content_len(0),
-              _curr(0),
-              _adler_checksum(ADLER32_INIT),
-              _ready(false) {}
-
-    BinaryFile* _file;
-    TabletSharedPtr _tablet;
-    size_t _content_len;
-    size_t _curr;
-    uint32_t _adler_checksum;
-    bool _ready;
-};
-
-// input file reader for Protobuffer format
-class BinaryReader : public IBinaryReader {
-public:
-    explicit BinaryReader();
-    virtual ~BinaryReader() { finalize(); }
-
-    virtual OLAPStatus init(TabletSharedPtr tablet, BinaryFile* file);
-    virtual OLAPStatus finalize();
-
-    virtual OLAPStatus next(RowCursor* row);
-
-    virtual bool eof() { return _curr >= _content_len; }
-
-private:
-    char* _row_buf;
-    size_t _row_buf_size;
-};
-
-class LzoBinaryReader : public IBinaryReader {
-public:
-    explicit LzoBinaryReader();
-    virtual ~LzoBinaryReader() { finalize(); }
-
-    virtual OLAPStatus init(TabletSharedPtr tablet, BinaryFile* file);
-    virtual OLAPStatus finalize();
-
-    virtual OLAPStatus next(RowCursor* row);
-
-    virtual bool eof() { return _curr >= _content_len && _row_num == 0; }
-
-private:
-    OLAPStatus _next_block();
-
-    typedef uint32_t RowNumType;
-    typedef uint64_t CompressedSizeType;
-
-    char* _row_buf;
-    char* _row_compressed_buf;
-    char* _row_info_buf;
-    size_t _max_row_num;
-    size_t _max_row_buf_size;
-    size_t _max_compressed_buf_size;
-    size_t _row_num;
-    size_t _next_row_start;
+    PendingRowsetGuard _pending_rs_guard;
 };
 
 class PushBrokerReader {
-public:
-    PushBrokerReader() : _ready(false), _eof(false) {}
-    ~PushBrokerReader() {}
+    ENABLE_FACTORY_CREATOR(PushBrokerReader);
 
-    OLAPStatus init(const Schema* schema, const TBrokerScanRange& t_scan_range,
-                    const TDescriptorTable& t_desc_tbl);
-    OLAPStatus next(ContiguousRow* row);
+public:
+    PushBrokerReader(const Schema* schema, const TBrokerScanRange& t_scan_range,
+                     const TDescriptorTable& t_desc_tbl);
+    ~PushBrokerReader() = default;
+    Status init();
+    Status next(vectorized::Block* block);
     void print_profile();
 
-    OLAPStatus close() {
-        _ready = false;
-        return OLAP_SUCCESS;
-    }
-    bool eof() { return _eof; }
-    MemPool* mem_pool() { return _mem_pool.get(); }
+    Status close();
+    bool eof() const { return _eof; }
+
+protected:
+    Status _get_next_reader();
+    Status _init_src_block();
+    Status _cast_to_input_block();
+    Status _convert_to_output_block(vectorized::Block* block);
+    Status _init_expr_ctxes();
 
 private:
-    OLAPStatus fill_field_row(RowCursorCell* dst, const char* src,bool src_null, MemPool* mem_pool, FieldType type);
     bool _ready;
     bool _eof;
-    TupleDescriptor* _tuple_desc;
-    Tuple* _tuple;
-    const Schema* _schema;
+    int _next_range;
+    vectorized::Block* _src_block_ptr = nullptr;
+    vectorized::Block _src_block;
+    const TDescriptorTable& _t_desc_tbl;
+    std::unordered_map<std::string, TypeDescriptor> _name_to_col_type;
+    std::unordered_set<std::string> _missing_cols;
+    std::unordered_map<std::string, size_t> _src_block_name_to_idx;
+    vectorized::VExprContextSPtrs _dest_expr_ctxs;
+    vectorized::VExprContextSPtr _pre_filter_ctx_ptr;
+    std::vector<SlotDescriptor*> _src_slot_descs_order_by_dest;
+    std::unordered_map<int, int> _dest_slot_to_src_slot_index;
+
+    std::vector<SlotDescriptor*> _src_slot_descs;
+    std::unique_ptr<RowDescriptor> _row_desc;
+    const TupleDescriptor* _dest_tuple_desc = nullptr;
+
     std::unique_ptr<RuntimeState> _runtime_state;
-    RuntimeProfile* _runtime_profile;
-    std::shared_ptr<MemTracker> _mem_tracker;
-    std::unique_ptr<MemPool> _mem_pool;
-    std::unique_ptr<ScannerCounter> _counter;
-    std::unique_ptr<BaseScanner> _scanner;
+    RuntimeProfile* _runtime_profile = nullptr;
+    std::unique_ptr<vectorized::GenericReader> _cur_reader;
+    bool _cur_reader_eof;
+    const TBrokerScanRangeParams& _params;
+    const std::vector<TBrokerRangeDesc>& _ranges;
+    TFileScanRangeParams _file_params;
+    std::vector<TFileRangeDesc> _file_ranges;
+
+    std::unique_ptr<io::FileCacheStatistics> _file_cache_statistics;
+    std::unique_ptr<io::IOContext> _io_ctx;
+
+    // col names from _slot_descs
+    std::vector<std::string> _all_col_names;
+    std::unordered_map<std::string, ColumnValueRangeType>* _colname_to_value_range;
+    vectorized::VExprContextSPtrs _push_down_exprs;
+    const std::unordered_map<std::string, int>* _col_name_to_slot_id;
+    // single slot filter conjuncts
+    std::unordered_map<int, vectorized::VExprContextSPtrs> _slot_id_to_filter_conjuncts;
+    // not single(zero or multi) slot filter conjuncts
+    vectorized::VExprContextSPtrs _not_single_slot_filter_conjuncts;
+    // File source slot descriptors
+    std::vector<SlotDescriptor*> _file_slot_descs;
+    // row desc for default exprs
+    std::unique_ptr<RowDescriptor> _default_val_row_desc;
+    const TupleDescriptor* _real_tuple_desc = nullptr;
+
     // Not used, just for placeholding
-    std::vector<ExprContext*> _pre_filter_ctxs;
+    std::vector<TExpr> _pre_filter_texprs;
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_PUSH_HANDLER_H

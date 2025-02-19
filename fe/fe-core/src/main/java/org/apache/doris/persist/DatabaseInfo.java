@@ -17,25 +17,39 @@
 
 package org.apache.doris.persist;
 
-import org.apache.doris.analysis.AlterDatabaseQuotaStmt.QuotaType;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.alter.QuotaType;
+import org.apache.doris.catalog.BinlogConfig;
 import org.apache.doris.catalog.Database.DbState;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.persist.gson.GsonPostProcessable;
+import org.apache.doris.persist.gson.GsonUtils;
+
+import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 
-public class DatabaseInfo implements Writable {
+public class DatabaseInfo implements Writable, GsonPostProcessable {
 
+    @SerializedName(value = "dbName")
     private String dbName;
+    @SerializedName(value = "newDbName")
     private String newDbName;
+    @SerializedName(value = "quota")
     private long quota;
+    @SerializedName(value = "clusterName")
     private String clusterName;
+    @SerializedName(value = "dbState")
     private DbState dbState;
+    @SerializedName(value = "quotaType")
     private QuotaType quotaType;
+    @SerializedName(value = "binlogConfig")
+    private BinlogConfig binlogConfig;
 
     public DatabaseInfo() {
         // for persist
@@ -45,6 +59,7 @@ public class DatabaseInfo implements Writable {
         this.clusterName = "";
         this.dbState = DbState.NORMAL;
         this.quotaType = QuotaType.DATA;
+        binlogConfig = null;
     }
 
     public DatabaseInfo(String dbName, String newDbName, long quota, QuotaType quotaType) {
@@ -54,6 +69,7 @@ public class DatabaseInfo implements Writable {
         this.clusterName = "";
         this.dbState = DbState.NORMAL;
         this.quotaType = quotaType;
+        this.binlogConfig = null;
     }
 
     public String getDbName() {
@@ -68,51 +84,51 @@ public class DatabaseInfo implements Writable {
         return quota;
     }
 
-    public static DatabaseInfo read(DataInput in) throws IOException {
-        DatabaseInfo dbInfo = new DatabaseInfo();
-        dbInfo.readFields(in);
-        return dbInfo;
+    public BinlogConfig getBinlogConfig() {
+        return binlogConfig;
     }
 
     @Override
     public void write(DataOutput out) throws IOException {
-        Text.writeString(out, dbName);
-        Text.writeString(out, newDbName);
-        out.writeLong(quota);
-        Text.writeString(out, this.clusterName);
-        Text.writeString(out, this.dbState.name());
-        Text.writeString(out, this.quotaType.name());
+        Text.writeString(out, GsonUtils.GSON.toJson(this));
     }
 
+    public static DatabaseInfo read(DataInput in) throws IOException {
+        if (Env.getCurrentEnvJournalVersion() < FeMetaVersion.VERSION_134) {
+            DatabaseInfo dbInfo = new DatabaseInfo();
+            dbInfo.readFields(in);
+            return dbInfo;
+        } else {
+            return GsonUtils.GSON.fromJson(Text.readString(in), DatabaseInfo.class);
+        }
+    }
+
+    @Deprecated
     public void readFields(DataInput in) throws IOException {
-        this.dbName = Text.readString(in);
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_10) {
-            newDbName = Text.readString(in);
-        }
+        this.dbName = ClusterNamespace.getNameFromFullName(Text.readString(in));
+        newDbName = ClusterNamespace.getNameFromFullName(Text.readString(in));
         this.quota = in.readLong();
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-            this.clusterName = Text.readString(in);
-            this.dbState = DbState.valueOf(Text.readString(in));
-        }
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_81) {
-            this.quotaType = QuotaType.valueOf(Text.readString(in));
-        }
-    }
-
-    public String getClusterName() {
-        return clusterName;
-    }
-
-    public void setClusterName(String clusterName) {
-        this.clusterName = clusterName;
-    }
-
-    public DbState getDbState() {
-        return dbState;
+        this.clusterName = Text.readString(in);
+        this.dbState = DbState.valueOf(Text.readString(in));
+        this.quotaType = QuotaType.valueOf(Text.readString(in));
     }
 
     public QuotaType getQuotaType() {
         return quotaType;
     }
 
+    public String toJson() {
+        return GsonUtils.GSON.toJson(this);
+    }
+
+    @Override
+    public String toString() {
+        return toJson();
+    }
+
+    @Override
+    public void gsonPostProcess() throws IOException {
+        dbName = ClusterNamespace.getNameFromFullName(dbName);
+        newDbName = ClusterNamespace.getNameFromFullName(newDbName);
+    }
 }

@@ -18,6 +18,7 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.alter.AlterOpType;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Index;
 import org.apache.doris.common.AnalysisException;
 
@@ -40,6 +41,15 @@ public class CreateIndexClause extends AlterTableClause {
         super(AlterOpType.SCHEMA_CHANGE);
         this.tableName = tableName;
         this.indexDef = indexDef;
+        this.alter = alter;
+    }
+
+    // for nereids
+    public CreateIndexClause(TableName tableName, IndexDef indexDef, Index index, boolean alter) {
+        super(AlterOpType.SCHEMA_CHANGE);
+        this.tableName = tableName;
+        this.indexDef = indexDef;
+        this.index = index;
         this.alter = alter;
     }
 
@@ -70,14 +80,29 @@ public class CreateIndexClause extends AlterTableClause {
             throw new AnalysisException("index definition expected.");
         }
         indexDef.analyze();
-        this.index = new Index(indexDef.getIndexName(), indexDef.getColumns(), indexDef.getIndexType(),
-                indexDef.getComment());
+        this.index = new Index(Env.getCurrentEnv().getNextId(), indexDef.getIndexName(),
+                indexDef.getColumns(), indexDef.getIndexType(),
+                indexDef.getProperties(), indexDef.getComment(), indexDef.getColumnUniqueIds());
+    }
+
+    @Override
+    public boolean allowOpMTMV() {
+        return true;
+    }
+
+    @Override
+    public boolean needChangeMTMVState() {
+        return false;
     }
 
     @Override
     public String toSql() {
+        return toSql(alter);
+    }
+
+    public String toSql(boolean alter) {
         if (alter) {
-            return indexDef.toSql();
+            return "ADD " + indexDef.toSql();
         } else {
             return "CREATE " + indexDef.toSql(tableName.toSql());
         }

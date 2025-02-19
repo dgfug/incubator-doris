@@ -27,11 +27,14 @@ namespace segment_v2 {
 
 // Encode page use frame-of-reference coding
 template <FieldType Type>
-class FrameOfReferencePageBuilder : public PageBuilder {
+class FrameOfReferencePageBuilder : public PageBuilderHelper<FrameOfReferencePageBuilder<Type>> {
 public:
-    explicit FrameOfReferencePageBuilder(const PageBuilderOptions& options)
-            : _options(options), _count(0), _finished(false) {
+    using Self = FrameOfReferencePageBuilder<Type>;
+    friend class PageBuilderHelper<Self>;
+
+    Status init() override {
         _encoder.reset(new ForEncoder<CppType>(&_buf));
+        return Status::OK();
     }
 
     bool is_page_full() override { return _encoder->len() >= _options.data_page_size; }
@@ -51,17 +54,19 @@ public:
         return Status::OK();
     }
 
-    OwnedSlice finish() override {
+    Status finish(OwnedSlice* slice) override {
         DCHECK(!_finished);
         _finished = true;
         _encoder->flush();
-        return _buf.build();
+        RETURN_IF_CATCH_EXCEPTION({ *slice = _buf.build(); });
+        return Status::OK();
     }
 
-    void reset() override {
+    Status reset() override {
         _count = 0;
         _finished = false;
         _encoder->clear();
+        return Status::OK();
     }
 
     size_t count() const override { return _count; }
@@ -70,7 +75,7 @@ public:
 
     Status get_first_value(void* value) const override {
         if (_count == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         memcpy(value, &_first_val, sizeof(CppType));
         return Status::OK();
@@ -78,13 +83,16 @@ public:
 
     Status get_last_value(void* value) const override {
         if (_count == 0) {
-            return Status::NotFound("page is empty");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("page is empty");
         }
         memcpy(value, &_last_val, sizeof(CppType));
         return Status::OK();
     }
 
 private:
+    explicit FrameOfReferencePageBuilder(const PageBuilderOptions& options)
+            : _options(options), _count(0), _finished(false) {}
+
     typedef typename TypeTraits<Type>::CppType CppType;
     PageBuilderOptions _options;
     size_t _count;
@@ -135,34 +143,18 @@ public:
         DCHECK(_parsed) << "Must call init() firstly";
         bool found = _decoder->seek_at_or_after_value(value, exact_match);
         if (!found) {
-            return Status::NotFound("not found");
+            return Status::Error<ErrorCode::ENTRY_NOT_FOUND>("not found");
         }
         _cur_index = _decoder->current_index();
         return Status::OK();
     }
 
-    Status next_batch(size_t* n, ColumnBlockView* dst) override { return next_batch<true>(n, dst); }
-
-    template <bool forward_index>
-    inline Status next_batch(size_t* n, ColumnBlockView* dst) {
-        DCHECK(_parsed) << "Must call init() firstly";
-        if (PREDICT_FALSE(*n == 0 || _cur_index >= _num_elements)) {
-            *n = 0;
-            return Status::OK();
-        }
-
-        size_t to_fetch = std::min(*n, static_cast<size_t>(_num_elements - _cur_index));
-        uint8_t* data_ptr = dst->data();
-        _decoder->get_batch(reinterpret_cast<CppType*>(data_ptr), to_fetch);
-        if (forward_index) {
-            _cur_index += to_fetch;
-        }
-        *n = to_fetch;
-        return Status::OK();
+    Status next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
+        return Status::NotSupported("frame page not implement vec op now");
     }
 
-    Status peek_next_batch(size_t* n, ColumnBlockView* dst) override {
-        return next_batch<false>(n, dst);
+    Status peek_next_batch(size_t* n, vectorized::MutableColumnPtr& dst) override {
+        return Status::NotSupported("frame page not implement vec op now");
     }
 
     size_t count() const override { return _num_elements; }

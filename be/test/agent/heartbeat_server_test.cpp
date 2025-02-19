@@ -23,7 +23,6 @@
 #include "gen_cpp/Types_types.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "util/logging.h"
 
 using ::testing::_;
 using ::testing::Return;
@@ -36,12 +35,12 @@ namespace doris {
 TEST(HeartbeatTest, TestHeartbeat) {
     setenv("DORIS_HOME", "./", 1);
     THeartbeatResult heartbeat_result;
-    TMasterInfo ori_master_info;
-    ori_master_info.cluster_id = -1;
-    ori_master_info.epoch = 0;
-    ori_master_info.network_address.hostname = "";
-    ori_master_info.network_address.port = 0;
-    HeartbeatServer heartbeat_server(&ori_master_info);
+    ClusterInfo ori_cluster_info;
+    ori_cluster_info.cluster_id = -1;
+    ori_cluster_info.epoch = 0;
+    ori_cluster_info.network_address.hostname = "";
+    ori_cluster_info.network_address.port = 0;
+    HeartbeatServer heartbeat_server(&ori_cluster_info);
 
     heartbeat_server.heartbeat(heartbeat_result, master_info);
     EXPECT_EQ(TStatusCode::OK, heartbeat_result.status.status_code);
@@ -79,14 +78,3 @@ TEST(HeartbeatTest, TestHeartbeat) {
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    doris::init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

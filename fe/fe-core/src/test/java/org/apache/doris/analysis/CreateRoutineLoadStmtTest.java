@@ -17,19 +17,26 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.load.routineload.LoadDataSourceType;
+import org.apache.doris.load.routineload.kafka.KafkaConfiguration;
+import org.apache.doris.load.routineload.kafka.KafkaDataSourceProperties;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.SessionVariable;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import mockit.Expectations;
+import mockit.Injectable;
+import mockit.Mock;
+import mockit.MockUp;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,12 +47,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import mockit.Expectations;
-import mockit.Injectable;
-import mockit.Mock;
-import mockit.MockUp;
-import mockit.Mocked;
-
 public class CreateRoutineLoadStmtTest {
 
     private static final Logger LOG = LoggerFactory.getLogger(CreateRoutineLoadStmtTest.class);
@@ -53,7 +54,9 @@ public class CreateRoutineLoadStmtTest {
     Database database;
 
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
 
     @Mocked
     private ConnectContext ctx;
@@ -63,14 +66,18 @@ public class CreateRoutineLoadStmtTest {
 
     @Before
     public void setUp() {
-        new MockUp<Catalog>() {
+        new MockUp<Env>() {
             @Mock
-            public Catalog getCurrentCatalog() {
-                return catalog;
+            public Env getCurrentEnv() {
+                return env;
             }
         };
         new Expectations() {
             {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
                 catalog.getDbNullable(anyString);
                 minTimes = 0;
                 result = database;
@@ -100,9 +107,6 @@ public class CreateRoutineLoadStmtTest {
         String topicName = "topic1";
         String serverAddress = "http://127.0.0.1:8080";
         String kafkaPartitionString = "1,2,3";
-        List<String> partitionNameString = Lists.newArrayList();
-        partitionNameString.add("p1");
-        PartitionNames partitionNames = new PartitionNames(false, partitionNameString);
         Separator columnSeparator = new Separator(",");
 
         // duplicate load property
@@ -114,14 +118,14 @@ public class CreateRoutineLoadStmtTest {
         String typeName = LoadDataSourceType.KAFKA.name();
         Map<String, String> customProperties = Maps.newHashMap();
 
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_TOPIC_PROPERTY, topicName);
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_BROKER_LIST_PROPERTY, serverAddress);
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_PARTITIONS_PROPERTY, kafkaPartitionString);
+        customProperties.put(KafkaConfiguration.KAFKA_TOPIC.getName(), topicName);
+        customProperties.put(KafkaConfiguration.KAFKA_BROKER_LIST.getName(), serverAddress);
+        customProperties.put(KafkaConfiguration.KAFKA_PARTITIONS.getName(), kafkaPartitionString);
 
         CreateRoutineLoadStmt createRoutineLoadStmt = new CreateRoutineLoadStmt(labelName, tableNameString,
                                                                                 loadPropertyList, properties,
                                                                                 typeName, customProperties,
-                                                                                LoadTask.MergeType.APPEND);
+                                                                                LoadTask.MergeType.APPEND, "");
 
         new MockUp<StatementBase>() {
             @Mock
@@ -155,7 +159,6 @@ public class CreateRoutineLoadStmtTest {
         Separator columnSeparator = new Separator(",");
 
         // duplicate load property
-        TableName tableName = new TableName(dbName, tableNameString);
         List<ParseNode> loadPropertyList = new ArrayList<>();
         loadPropertyList.add(columnSeparator);
         loadPropertyList.add(partitionNames);
@@ -165,14 +168,14 @@ public class CreateRoutineLoadStmtTest {
         String typeName = LoadDataSourceType.KAFKA.name();
         Map<String, String> customProperties = Maps.newHashMap();
 
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_TOPIC_PROPERTY, topicName);
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_BROKER_LIST_PROPERTY, serverAddress);
-        customProperties.put(CreateRoutineLoadStmt.KAFKA_PARTITIONS_PROPERTY, kafkaPartitionString);
+        customProperties.put(KafkaConfiguration.KAFKA_TOPIC.getName(), topicName);
+        customProperties.put(KafkaConfiguration.KAFKA_BROKER_LIST.getName(), serverAddress);
+        customProperties.put(KafkaConfiguration.KAFKA_PARTITIONS.getName(), kafkaPartitionString);
 
         CreateRoutineLoadStmt createRoutineLoadStmt = new CreateRoutineLoadStmt(labelName, tableNameString,
                                                                                 loadPropertyList, properties,
                                                                                 typeName, customProperties,
-                                                                                LoadTask.MergeType.APPEND);
+                                                                                LoadTask.MergeType.APPEND, "");
         new MockUp<StatementBase>() {
             @Mock
             public void analyze(Analyzer analyzer1) {
@@ -180,12 +183,15 @@ public class CreateRoutineLoadStmtTest {
             }
         };
 
-        new Expectations(){
+        new Expectations() {
             {
                 ctx.getSessionVariable();
                 result = sessionVariable;
                 sessionVariable.getSendBatchParallelism();
                 result = 1;
+
+                sessionVariable.getTimeZone();
+                result = "Asia/Hong_Kong";
             }
         };
 
@@ -196,9 +202,81 @@ public class CreateRoutineLoadStmtTest {
         Assert.assertEquals(partitionNames.getPartitionNames(), createRoutineLoadStmt.getRoutineLoadDesc().getPartitionNames().getPartitionNames());
         Assert.assertEquals(2, createRoutineLoadStmt.getDesiredConcurrentNum());
         Assert.assertEquals(0, createRoutineLoadStmt.getMaxErrorNum());
-        Assert.assertEquals(serverAddress, createRoutineLoadStmt.getKafkaBrokerList());
-        Assert.assertEquals(topicName, createRoutineLoadStmt.getKafkaTopic());
+        KafkaDataSourceProperties kafkaDataSourceProperties = (KafkaDataSourceProperties) createRoutineLoadStmt.getDataSourceProperties();
+        Assert.assertEquals(serverAddress, kafkaDataSourceProperties.getBrokerList());
+        Assert.assertEquals(topicName, kafkaDataSourceProperties.getTopic());
         Assert.assertEquals("+08:00", createRoutineLoadStmt.getTimezone());
+    }
+
+    @Test
+    public void testMultiTableAnalyze(@Injectable Analyzer analyzer,
+                                      @Injectable SessionVariable sessionVariable) throws UserException {
+        String jobName = "job1";
+        String dbName = "db1";
+        LabelName labelName = new LabelName(dbName, jobName);
+        String topicName = "topic1";
+        String serverAddress = "127.0.0.1:8080";
+        String kafkaPartitionString = "1,2,3";
+        String timeZone = "8:00";
+        List<String> partitionNameString = Lists.newArrayList();
+        partitionNameString.add("p1");
+        PartitionNames partitionNames = new PartitionNames(false, partitionNameString);
+        Separator columnSeparator = new Separator(",");
+
+        // duplicate load property
+        List<ParseNode> loadPropertyList = new ArrayList<>();
+        loadPropertyList.add(columnSeparator);
+        loadPropertyList.add(partitionNames);
+        Map<String, String> properties = Maps.newHashMap();
+        properties.put(CreateRoutineLoadStmt.DESIRED_CONCURRENT_NUMBER_PROPERTY, "2");
+        properties.put(LoadStmt.TIMEZONE, timeZone);
+        String typeName = LoadDataSourceType.KAFKA.name();
+        Map<String, String> customProperties = Maps.newHashMap();
+
+        customProperties.put(KafkaConfiguration.KAFKA_TOPIC.getName(), topicName);
+        customProperties.put(KafkaConfiguration.KAFKA_BROKER_LIST.getName(), serverAddress);
+        customProperties.put(KafkaConfiguration.KAFKA_PARTITIONS.getName(), kafkaPartitionString);
+        customProperties.put(KafkaConfiguration.KAFKA_TEXT_TABLE_NAME_FIELD_DELIMITER.getName(), "\t");
+        customProperties.put(KafkaConfiguration.KAFKA_TEXT_TABLE_NAME_FIELD_INDEX.getName(), "2");
+        customProperties.put(KafkaConfiguration.KAFKA_TABLE_NAME_FORMAT.getName(), "TEXT");
+
+        CreateRoutineLoadStmt createRoutineLoadStmt = new CreateRoutineLoadStmt(labelName, null,
+                loadPropertyList, properties,
+                typeName, customProperties,
+                LoadTask.MergeType.APPEND, "");
+        new MockUp<StatementBase>() {
+            @Mock
+            public void analyze(Analyzer analyzer1) {
+                return;
+            }
+        };
+
+        new Expectations() {
+            {
+                ctx.getSessionVariable();
+                result = sessionVariable;
+                sessionVariable.getSendBatchParallelism();
+                result = 1;
+
+                sessionVariable.getTimeZone();
+                result = "Asia/Hong_Kong";
+            }
+        };
+
+        createRoutineLoadStmt.analyze(analyzer);
+
+        Assert.assertNotNull(createRoutineLoadStmt.getRoutineLoadDesc());
+        Assert.assertEquals(columnSeparator, createRoutineLoadStmt.getRoutineLoadDesc().getColumnSeparator());
+        Assert.assertEquals(partitionNames.getPartitionNames(), createRoutineLoadStmt.getRoutineLoadDesc().getPartitionNames().getPartitionNames());
+        Assert.assertEquals(2, createRoutineLoadStmt.getDesiredConcurrentNum());
+        Assert.assertEquals(0, createRoutineLoadStmt.getMaxErrorNum());
+        KafkaDataSourceProperties kafkaDataSourceProperties = (KafkaDataSourceProperties) createRoutineLoadStmt.getDataSourceProperties();
+        Assert.assertEquals(serverAddress, kafkaDataSourceProperties.getBrokerList());
+        Assert.assertEquals(topicName, kafkaDataSourceProperties.getTopic());
+        Assert.assertEquals("+08:00", createRoutineLoadStmt.getTimezone());
+        Assert.assertEquals("\t", kafkaDataSourceProperties.getTableNameProperties().get(KafkaConfiguration.KAFKA_TEXT_TABLE_NAME_FIELD_DELIMITER.getName()));
+        Assert.assertEquals("2", kafkaDataSourceProperties.getTableNameProperties().get(KafkaConfiguration.KAFKA_TEXT_TABLE_NAME_FIELD_INDEX.getName()));
+        Assert.assertEquals("TEXT", kafkaDataSourceProperties.getTableNameProperties().get(KafkaConfiguration.KAFKA_TABLE_NAME_FORMAT.getName()));
     }
 
 }

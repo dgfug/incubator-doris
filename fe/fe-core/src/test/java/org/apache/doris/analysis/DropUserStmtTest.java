@@ -19,37 +19,36 @@ package org.apache.doris.analysis;
 
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.mysql.privilege.AccessControllerManager;
 import org.apache.doris.mysql.privilege.MockedAuth;
-import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.qe.ConnectContext;
 
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import mockit.Mocked;
-
 public class DropUserStmtTest {
     private Analyzer analyzer;
-    
+
     @Mocked
-    private PaloAuth auth;
+    private AccessControllerManager accessManager;
     @Mocked
     private ConnectContext ctx;
 
     @Before
     public void setUp() {
-        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
-        MockedAuth.mockedAuth(auth);
+        MockedAuth.mockedAccess(accessManager);
         MockedAuth.mockedConnectContext(ctx, "root", "192.168.1.1");
+        analyzer = AccessTestUtil.fetchAdminAnalyzer(true);
     }
 
     @Test
     public void testNormal() throws UserException, AnalysisException {
         DropUserStmt stmt = new DropUserStmt(new UserIdentity("user", "%"));
         stmt.analyze(analyzer);
-        Assert.assertEquals("DROP USER 'testCluster:user'@'%'", stmt.toString());
-        Assert.assertEquals("testCluster:user", stmt.getUserIdentity().getQualifiedUser());
+        Assert.assertEquals("DROP USER 'user'@'%'", stmt.toString());
+        Assert.assertEquals("user", stmt.getUserIdentity().getQualifiedUser());
     }
 
     @Test(expected = AnalysisException.class)

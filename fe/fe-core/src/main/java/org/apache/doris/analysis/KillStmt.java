@@ -22,21 +22,33 @@ package org.apache.doris.analysis;
  * Acceptable syntax:
  * KILL [QUERY | CONNECTION] connection_id
  */
-public class KillStmt extends StatementBase {
+public class KillStmt extends StatementBase implements NotFallbackInParser {
     private final boolean isConnectionKill;
-    private final long connectionId;
+    private final int connectionId;
+    private final String queryId;
 
-    public KillStmt(boolean isConnectionKill, long connectionId) {
+    public KillStmt(boolean isConnectionKill, int connectionId) {
         this.isConnectionKill = isConnectionKill;
         this.connectionId = connectionId;
+        this.queryId = "";
+    }
+
+    public KillStmt(String queryId) {
+        this.isConnectionKill = false;
+        this.connectionId = -1;
+        this.queryId = queryId;
     }
 
     public boolean isConnectionKill() {
         return isConnectionKill;
     }
 
-    public long getConnectionId() {
+    public int getConnectionId() {
         return connectionId;
+    }
+
+    public String getQueryId() {
+        return queryId;
     }
 
     @Override
@@ -59,10 +71,14 @@ public class KillStmt extends StatementBase {
     public String toString() {
         return toSql();
     }
-    
+
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.NO_FORWARD;
     }
-}
 
+    @Override
+    public StmtType stmtType() {
+        return StmtType.KILL;
+    }
+}

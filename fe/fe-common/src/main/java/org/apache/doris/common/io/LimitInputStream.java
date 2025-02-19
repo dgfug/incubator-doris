@@ -40,7 +40,7 @@ public class LimitInputStream extends InputStream {
 
     /**
      * An input stream that reads the limited bytes to the given stream.
-     * 
+     *
      * @param in
      *            The stream to be limited
      * @param limitspeed
@@ -51,7 +51,9 @@ public class LimitInputStream extends InputStream {
             throw new IOException("InputStream is null");
         }
         speed = limitspeed;
-        LOG.debug("LimitinputStream limit speed: {}", speed);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("LimitinputStream limit speed: {}", speed);
+        }
         this.in = in;
         bytesReadTotal = 0;
         bstart = false;

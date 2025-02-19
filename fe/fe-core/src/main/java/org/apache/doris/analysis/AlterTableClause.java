@@ -29,7 +29,17 @@ public abstract class AlterTableClause extends AlterClause {
     // if set to true, the corresponding table should be stable before processing this operation on it.
     protected boolean needTableStable = true;
 
+    protected TableName tableName;
+
     public boolean isNeedTableStable() {
         return needTableStable;
     }
+
+    public void setTableName(TableName tableName) {
+        this.tableName = tableName;
+    }
+
+    public abstract boolean allowOpMTMV();
+
+    public abstract boolean needChangeMTMVState();
 }

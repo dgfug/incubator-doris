@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_COMMON_OBJECT_POOL_H
-#define DORIS_BE_SRC_COMMON_COMMON_OBJECT_POOL_H
+#pragma once
 
 #include <mutex>
 #include <vector>
@@ -38,20 +37,25 @@ public:
     T* add(T* t) {
         // TODO: Consider using a lock-free structure.
         std::lock_guard<SpinLock> l(_lock);
-        _objects.emplace_back(Element{t, [](void* obj) { delete reinterpret_cast<T*>(obj); }});
+        _objects.emplace_back(Element {t, [](void* obj) { delete reinterpret_cast<T*>(obj); }});
         return t;
     }
 
     template <class T>
     T* add_array(T* t) {
         std::lock_guard<SpinLock> l(_lock);
-        _objects.emplace_back(Element{t, [](void* obj) { delete[] reinterpret_cast<T*>(obj); }});
+        _objects.emplace_back(Element {t, [](void* obj) { delete[] reinterpret_cast<T*>(obj); }});
         return t;
     }
 
     void clear() {
         std::lock_guard<SpinLock> l(_lock);
-        for (Element& elem : _objects) elem.delete_fn(elem.obj);
+        // reverse delete object to make sure the obj can
+        // safe access the member object construt early by
+        // object pool
+        for (auto obj = _objects.rbegin(); obj != _objects.rend(); obj++) {
+            obj->delete_fn(obj->obj);
+        }
         _objects.clear();
     }
 
@@ -60,15 +64,21 @@ public:
         src->_objects.clear();
     }
 
+    uint64_t size() {
+        std::lock_guard<SpinLock> l(_lock);
+        return _objects.size();
+    }
+
 private:
-    DISALLOW_COPY_AND_ASSIGN(ObjectPool);
+    ObjectPool(const ObjectPool&) = delete;
+    void operator=(const ObjectPool&) = delete;
 
     /// A generic deletion function pointer. Deletes its first argument.
     using DeleteFn = void (*)(void*);
 
     /// For each object, a pointer to the object and a function that deletes it.
     struct Element {
-        void* obj;
+        void* obj = nullptr;
         DeleteFn delete_fn;
     };
 
@@ -77,5 +87,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

@@ -15,38 +15,41 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_SCHEMA_SCANNER_SCHEMA_CHARSETS_SCANNER_H
-#define DORIS_BE_SRC_QUERY_EXEC_SCHEMA_SCANNER_SCHEMA_CHARSETS_SCANNER_H
+#pragma once
 
 #include <stdint.h>
 
+#include <vector>
+
+#include "common/status.h"
 #include "exec/schema_scanner.h"
-#include "gen_cpp/FrontendService_types.h"
 
 namespace doris {
+namespace vectorized {
+class Block;
+} // namespace vectorized
 
 class SchemaCharsetsScanner : public SchemaScanner {
+    ENABLE_FACTORY_CREATOR(SchemaCharsetsScanner);
+
 public:
     SchemaCharsetsScanner();
-    virtual ~SchemaCharsetsScanner();
+    ~SchemaCharsetsScanner() override;
 
-    virtual Status get_next_row(Tuple* tuple, MemPool* pool, bool* eos);
+    Status get_next_block_internal(vectorized::Block* block, bool* eos) override;
 
 private:
     struct CharsetStruct {
-        const char* charset;
-        const char* default_collation;
-        const char* description;
+        const char* charset = nullptr;
+        const char* default_collation = nullptr;
+        const char* description = nullptr;
         int64_t maxlen;
     };
 
-    Status fill_one_row(Tuple* tuple, MemPool* pool);
+    Status _fill_block_impl(vectorized::Block* block);
 
-    int _index;
-    static SchemaScanner::ColumnDesc _s_css_columns[];
+    static std::vector<SchemaScanner::ColumnDesc> _s_css_columns;
     static CharsetStruct _s_charsets[];
 };
 
 } // namespace doris
-
-#endif

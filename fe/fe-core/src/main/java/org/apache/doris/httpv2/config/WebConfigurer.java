@@ -40,7 +40,7 @@ public class WebConfigurer implements WebMvcConfigurer {
         registry.addInterceptor(new AuthInterceptor())
                 .addPathPatterns("/rest/v1/**")
                 .excludePathPatterns("/", "/api/**", "/rest/v1/login", "/rest/v1/logout", "/static/**", "/metrics")
-                .excludePathPatterns("/image","/info","/version","/put","/journal_id","/role","/check","/dump");
+                .excludePathPatterns("/image", "/info", "/version", "/put", "/journal_id", "/role", "/check", "/dump");
     }
 
     @Override
@@ -48,7 +48,7 @@ public class WebConfigurer implements WebMvcConfigurer {
         registry.addMapping("/**")
                 .allowCredentials(false)
                 .allowedMethods("*")
-                .allowedOrigins("*")
+                .allowedOrigins(Config.access_control_allowed_origin_domain)
                 .allowedHeaders("*")
                 .maxAge(3600);
     }
@@ -65,6 +65,7 @@ public class WebConfigurer implements WebMvcConfigurer {
                     "/notFound"));
         };
     }
+
     @Bean(name = "multipartResolver")
     public CommonsMultipartResolver multipartResolver() {
         CommonsMultipartResolver multipartResolver = new CommonsMultipartResolver();
@@ -72,4 +73,3 @@ public class WebConfigurer implements WebMvcConfigurer {
         return multipartResolver;
     }
 }
-

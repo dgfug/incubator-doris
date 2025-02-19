@@ -28,7 +28,7 @@ import org.apache.doris.analysis.PartitionNames;
 import org.apache.doris.analysis.Separator;
 import org.apache.doris.analysis.SqlParser;
 import org.apache.doris.analysis.SqlScanner;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
@@ -41,21 +41,20 @@ import org.apache.doris.load.loadv2.JobState;
 import org.apache.doris.load.loadv2.LoadJob;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.system.Backend;
-import org.apache.doris.thrift.TMiniLoadRequest;
+import org.apache.doris.system.BeSelectionPolicy;
+import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TNetworkAddress;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.google.common.collect.Streams;
-
-import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.awaitility.Awaitility;
 
 import java.io.StringReader;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -90,40 +89,28 @@ public class MultiLoadMgr {
             if (infoMap.containsKey(multiLabel)) {
                 throw new LabelAlreadyUsedException(label);
             }
-            MultiLoadDesc multiLoadDesc = new MultiLoadDesc(multiLabel, properties);
-            List<Long> backendIds = Catalog.getCurrentSystemInfo().seqChooseBackendIdsByStorageMediumAndTag(1,
-                    true, false, ConnectContext.get().getClusterName(), null, null);
-            if (backendIds == null) {
-                throw new DdlException("No backend alive.");
+            BeSelectionPolicy policy = new BeSelectionPolicy.Builder().needLoadAvailable().build();
+            List<Long> backendIds = Env.getCurrentSystemInfo().selectBackendIdsByPolicy(policy, 1);
+            if (backendIds.isEmpty()) {
+                throw new DdlException(SystemInfoService.NO_BACKEND_LOAD_AVAILABLE_MSG + " policy: " + policy);
             }
+            MultiLoadDesc multiLoadDesc = new MultiLoadDesc(multiLabel, properties);
             multiLoadDesc.setBackendId(backendIds.get(0));
             infoMap.put(multiLabel, multiLoadDesc);
         } finally {
             lock.writeLock().unlock();
         }
         // Register to Load after put into map.
-        Catalog.getCurrentCatalog().getLoadManager().createLoadJobV1FromMultiStart(fullDbName, label);
-    }
-
-    public void load(TMiniLoadRequest request) throws DdlException {
-        if (CollectionUtils.isNotEmpty(request.getFileSize())
-                && request.getFileSize().size() != request.getFiles().size()) {
-            throw new DdlException("files count and file size count not match: [" + request.getFileSize().size()
-                    + "!=" + request.getFiles().size()+"]");
-        }
-        List<Pair<String, Long>> files = Streams.zip(request.getFiles().stream(), request.getFileSize().stream(), Pair::create)
-                .collect(Collectors.toList());
-        load(request.getDb(), request.getLabel(), request.getSubLabel(), request.getTbl(),
-                files, request.getBackend(), request.getProperties(), request.getTimestamp());
+        Env.getCurrentEnv().getLoadManager().createLoadJobV1FromMultiStart(fullDbName, label);
     }
 
     // Add one load job
     private void load(String fullDbName, String label,
-                     String subLabel, String table,
-                     List<Pair<String, Long>> files,
-                     TNetworkAddress fileAddr,
-                     Map<String, String> properties,
-                     long timestamp) throws DdlException {
+            String subLabel, String table,
+            List<Pair<String, Long>> files,
+            TNetworkAddress fileAddr,
+            Map<String, String> properties,
+            long timestamp) throws DdlException {
         LabelName multiLabel = new LabelName(fullDbName, label);
         lock.writeLock().lock();
         try {
@@ -153,7 +140,7 @@ public class MultiLoadMgr {
 
     // 'db' and 'label' form a multiLabel used to
     // user can pass commitLabel which use this string commit to jobmgr
-    public void commit(String fullDbName, String label) throws DdlException {
+    public void commit(String fullDbName, String label) throws DdlException, UserException {
         LabelName multiLabel = new LabelName(fullDbName, label);
         List<Long> jobIds = Lists.newArrayList();
         lock.writeLock().lock();
@@ -162,18 +149,18 @@ public class MultiLoadMgr {
             if (multiLoadDesc == null) {
                 throw new DdlException("Unknown label(" + multiLabel + ")");
             }
-            jobIds.add(Catalog.getCurrentCatalog().getLoadManager().createLoadJobFromStmt(multiLoadDesc.toLoadStmt()));
+            jobIds.add(Env.getCurrentEnv().getLoadManager().createLoadJobFromStmt(multiLoadDesc.toLoadStmt()));
             infoMap.remove(multiLabel);
         } finally {
             lock.writeLock().unlock();
         }
         final long jobId = jobIds.isEmpty() ? -1 : jobIds.get(0);
-        Catalog.getCurrentCatalog().getLoadInstance().deregisterMiniLabel(fullDbName, label);
-        Catalog catalog = Catalog.getCurrentCatalog();
+        Env.getCurrentEnv().getLoadInstance().deregisterMiniLabel(fullDbName, label);
+        Env env = Env.getCurrentEnv();
         ConnectContext ctx = ConnectContext.get();
         Awaitility.await().atMost(Config.broker_load_default_timeout_second, TimeUnit.SECONDS).until(() -> {
             ConnectContext.threadLocalInfo.set(ctx);
-            LoadJob loadJob = catalog.getLoadManager().getLoadJob(jobId);
+            LoadJob loadJob = env.getLoadManager().getLoadJob(jobId);
             if (loadJob.getState() == JobState.FINISHED) {
                 return true;
             } else if (loadJob.getState() == JobState.PENDING || loadJob.getState() == JobState.LOADING) {
@@ -199,7 +186,7 @@ public class MultiLoadMgr {
         } finally {
             lock.writeLock().unlock();
         }
-        Catalog.getCurrentCatalog().getLoadInstance().deregisterMiniLabel(fullDbName, label);
+        Env.getCurrentEnv().getLoadInstance().deregisterMiniLabel(fullDbName, label);
     }
 
     public void desc(String fullDbName, String label, List<String> subLabels) throws DdlException {
@@ -241,7 +228,7 @@ public class MultiLoadMgr {
             if (desc == null) {
                 throw new DdlException("Unknown multiLabel(" + multiLabel + ")");
             }
-            Backend backend = Catalog.getCurrentSystemInfo().getBackend(desc.getBackendId());
+            Backend backend = Env.getCurrentSystemInfo().getBackend(desc.getBackendId());
             return new TNetworkAddress(backend.getHost(), backend.getHttpPort());
         } finally {
             lock.writeLock().unlock();
@@ -265,9 +252,9 @@ public class MultiLoadMgr {
         }
 
         public void addFile(String subLabel, String table, List<Pair<String, Long>> files,
-                            TNetworkAddress fileAddr, 
-                            Map<String, String> properties,
-                            long timestamp) throws DdlException {
+                TNetworkAddress fileAddr,
+                Map<String, String> properties,
+                long timestamp) throws DdlException {
 
             if (isSubLabelUsed(subLabel, timestamp)) {
                 // sub label is used and this is a retry request.
@@ -349,7 +336,6 @@ public class MultiLoadMgr {
             return backendId;
         }
 
-
         public LoadStmt toLoadStmt() throws DdlException {
             LabelName commitLabel = multiLabel;
 
@@ -360,15 +346,23 @@ public class MultiLoadMgr {
             Map<String, String> brokerProperties = Maps.newHashMap();
             brokerProperties.put(BrokerDesc.MULTI_LOAD_BROKER_BACKEND_KEY, backendId.toString());
             BrokerDesc brokerDesc = new BrokerDesc(BrokerDesc.MULTI_LOAD_BROKER, brokerProperties);
-            LoadStmt loadStmt = new LoadStmt(commitLabel, dataDescriptions, brokerDesc, null, properties);
+
+            String comment = "multi load";
+            if (properties.containsKey(LoadStmt.KEY_COMMENT)) {
+                comment = properties.get(LoadStmt.KEY_COMMENT);
+                properties.remove(LoadStmt.KEY_COMMENT);
+            }
+
+            properties.remove(LoadStmt.KEY_COMMENT);
+            LoadStmt loadStmt = new LoadStmt(commitLabel, dataDescriptions, brokerDesc, properties, comment);
             loadStmt.setEtlJobType(EtlJobType.BROKER);
             loadStmt.setOrigStmt(new OriginStatement("", 0));
             loadStmt.setUserInfo(ConnectContext.get().getCurrentUserIdentity());
-            Analyzer analyzer = new Analyzer(ConnectContext.get().getCatalog(), ConnectContext.get());
+            Analyzer analyzer = new Analyzer(ConnectContext.get().getEnv(), ConnectContext.get());
             try {
                 loadStmt.analyze(analyzer);
             } catch (UserException e) {
-               throw new DdlException(e.getMessage());
+                throw new DdlException(e.getMessage());
             }
             return loadStmt;
         }
@@ -387,8 +381,8 @@ public class MultiLoadMgr {
         private Set<Long> timestamps = Sets.newHashSet();
 
         public TableLoadDesc(String tbl, String label, List<Pair<String, Long>> files,
-                             TNetworkAddress address, Map<String, String> properties,
-                             long timestamp) {
+                TNetworkAddress address, Map<String, String> properties,
+                long timestamp) {
             this.tbl = tbl;
             this.filesByLabel = Maps.newLinkedHashMap();
 
@@ -422,7 +416,6 @@ public class MultiLoadMgr {
             timestamps.add(timestamp);
         }
 
-
         public Long getBackendId() {
             return backendId;
         }
@@ -436,9 +429,9 @@ public class MultiLoadMgr {
             List<String> files = Lists.newArrayList();
             List<Long> fileSizes = Lists.newArrayList();
             Iterator<Map.Entry<String, List<Pair<String, Long>>>> it = filesByLabel.entrySet().iterator();
-            while(it.hasNext()) {
+            while (it.hasNext()) {
                 List<Pair<String, Long>> value = it.next().getValue();
-                value.stream().forEach(pair -> {
+                value.forEach(pair -> {
                     files.add(pair.first);
                     fileSizes.add(pair.second);
                 });
@@ -447,7 +440,7 @@ public class MultiLoadMgr {
             PartitionNames partitionNames = null;
             String fileFormat = properties.get(LoadStmt.KEY_IN_PARAM_FORMAT_TYPE);
             boolean isNegative = properties.get(LoadStmt.KEY_IN_PARAM_NEGATIVE) == null ? false :
-                    Boolean.valueOf(properties.get(LoadStmt.KEY_IN_PARAM_NEGATIVE));
+                    Boolean.parseBoolean(properties.get(LoadStmt.KEY_IN_PARAM_NEGATIVE));
             Expr whereExpr = null;
             LoadTask.MergeType mergeType = LoadTask.MergeType.APPEND;
             Expr deleteCondition = null;
@@ -470,11 +463,16 @@ public class MultiLoadMgr {
                     }
                 }
                 if (properties.get(LoadStmt.KEY_IN_PARAM_PARTITIONS) != null) {
-                    String[] partNames = properties.get(LoadStmt.KEY_IN_PARAM_PARTITIONS).trim().split("\\s*,\\s*");
-                    partitionNames = new PartitionNames(false, Lists.newArrayList(partNames));
+                    String[] splitPartNames = properties.get(LoadStmt.KEY_IN_PARAM_PARTITIONS).trim().split(",");
+                    List<String> partNames = Arrays.stream(splitPartNames).map(String::trim)
+                            .collect(Collectors.toList());
+                    partitionNames = new PartitionNames(false, partNames);
                 } else if (properties.get(LoadStmt.KEY_IN_PARAM_TEMP_PARTITIONS) != null) {
-                    String[] partNames = properties.get(LoadStmt.KEY_IN_PARAM_TEMP_PARTITIONS).trim().split("\\s*,\\s*");
-                    partitionNames = new PartitionNames(true, Lists.newArrayList(partNames));
+                    String[] splitTempPartNames = properties.get(LoadStmt.KEY_IN_PARAM_TEMP_PARTITIONS).trim()
+                            .split(",");
+                    List<String> tempPartNames = Arrays.stream(splitTempPartNames).map(String::trim)
+                            .collect(Collectors.toList());
+                    partitionNames = new PartitionNames(true, tempPartNames);
                 }
                 if (properties.get(LoadStmt.KEY_IN_PARAM_MERGE_TYPE) != null) {
                     mergeType = LoadTask.MergeType.valueOf(properties.get(LoadStmt.KEY_IN_PARAM_MERGE_TYPE));
@@ -491,14 +489,14 @@ public class MultiLoadMgr {
                     jsonPaths = properties.getOrDefault(LoadStmt.KEY_IN_PARAM_JSONPATHS, "");
                     jsonRoot = properties.getOrDefault(LoadStmt.KEY_IN_PARAM_JSONROOT, "");
                     fuzzyParse = Boolean.valueOf(
-                        properties.getOrDefault(LoadStmt.KEY_IN_PARAM_FUZZY_PARSE, "false"));
+                            properties.getOrDefault(LoadStmt.KEY_IN_PARAM_FUZZY_PARSE, "false"));
                 }
             }
             DataDescription dataDescription = new DataDescription(tbl, partitionNames, files, null, columnSeparator,
                     fileFormat, null, isNegative, null, null, whereExpr, mergeType, deleteCondition,
                     sequenceColName, null);
             dataDescription.setColumnDef(colString);
-            backend = Catalog.getCurrentSystemInfo().getBackend(backendId);
+            backend = Env.getCurrentSystemInfo().getBackend(backendId);
             if (backend == null) {
                 throw new DdlException("Backend [" + backendId + "] not found. ");
             }
@@ -538,4 +536,3 @@ public class MultiLoadMgr {
         }
     }
 }
-

@@ -23,6 +23,7 @@ import org.apache.doris.common.Status;
 import org.apache.doris.proto.InternalService;
 import org.apache.doris.qe.RowBatch;
 import org.apache.doris.thrift.TUniqueId;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -38,8 +39,9 @@ public abstract class Cache {
     }
 
     protected TUniqueId queryId;
-    protected SelectStmt selectStmt;
+    protected final SelectStmt selectStmt;
     protected RowBatchBuilder rowBatchBuilder;
+    protected boolean disableCache = false;
     protected CacheAnalyzer.CacheTable latestTable;
     protected CacheProxy proxy;
     protected HitRange hitRange;
@@ -48,8 +50,15 @@ public abstract class Cache {
     protected Cache(TUniqueId queryId, SelectStmt selectStmt) {
         this.queryId = queryId;
         this.selectStmt = selectStmt;
-        proxy = CacheProxy.getCacheProxy(CacheProxy.CacheProxyType.BE);
-        hitRange = HitRange.None;
+        this.proxy = CacheProxy.getCacheProxy(CacheProxy.CacheProxyType.BE);
+        this.hitRange = HitRange.None;
+    }
+
+    protected Cache(TUniqueId queryId) {
+        this.queryId = queryId;
+        this.selectStmt = null;
+        this.proxy = CacheProxy.getCacheProxy(CacheProxy.CacheProxyType.BE);
+        this.hitRange = HitRange.None;
     }
 
     public abstract InternalService.PFetchCacheResult getCacheData(Status status);
@@ -73,16 +82,36 @@ public abstract class Cache {
      */
     public abstract void updateCache();
 
+    public boolean isDisableCache() {
+        return disableCache;
+    }
+
     protected boolean checkRowLimit() {
-        if (rowBatchBuilder == null) {
+        if (disableCache || rowBatchBuilder == null) {
             return false;
         }
         if (rowBatchBuilder.getRowSize() > Config.cache_result_max_row_count) {
-            LOG.info("can not be cached. rowbatch size {} is more than {}", rowBatchBuilder.getRowSize(),
-                    Config.cache_result_max_row_count);
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("can not be cached. rowbatch size {} is more than {}", rowBatchBuilder.getRowSize(),
+                        Config.cache_result_max_row_count);
+            }
+            rowBatchBuilder.clear();
+            disableCache = true;
+            return false;
+        } else if (rowBatchBuilder.getDataSize() > Config.cache_result_max_data_size) {
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("can not be cached. rowbatch data size {} is more than {}", rowBatchBuilder.getDataSize(),
+                        Config.cache_result_max_data_size);
+            }
+            rowBatchBuilder.clear();
+            disableCache = true;
             return false;
         } else {
             return true;
         }
+    }
+
+    public CacheProxy getProxy() {
+        return proxy;
     }
 }

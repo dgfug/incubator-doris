@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+@Deprecated
 public class SparkPendingTaskAttachment extends TaskAttachment {
     private SparkLoadAppHandle handle;
     private String appId;
@@ -52,9 +53,9 @@ public class SparkPendingTaskAttachment extends TaskAttachment {
 
     @Override
     public String toString() {
-        return "SparkPendingTaskAttachment{" +
-                "appId='" + appId + '\'' +
-                ", outputPath='" + outputPath + '\'' +
-                '}';
+        return "SparkPendingTaskAttachment{"
+                + "appId='" + appId + '\''
+                + ", outputPath='" + outputPath + '\''
+                + '}';
     }
 }

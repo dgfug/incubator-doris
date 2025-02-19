@@ -18,22 +18,23 @@
 package org.apache.doris.load;
 
 import org.apache.doris.analysis.ShowStreamLoadStmt.StreamLoadState;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
-import org.apache.doris.cluster.ClusterNamespace;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.ClientPool;
 import org.apache.doris.common.Config;
-import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.MasterDaemon;
 import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.datasource.InternalCatalog;
+import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.persist.gson.GsonUtils;
 import org.apache.doris.plugin.AuditEvent;
 import org.apache.doris.plugin.AuditEvent.EventType;
-import org.apache.doris.plugin.StreamLoadAuditEvent;
+import org.apache.doris.plugin.audit.StreamLoadAuditEvent;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.system.Backend;
-import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.BackendService;
 import org.apache.doris.thrift.TNetworkAddress;
 import org.apache.doris.thrift.TStreamLoadRecord;
@@ -43,14 +44,14 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import com.google.gson.annotations.SerializedName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -62,12 +63,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
-import com.google.gson.annotations.SerializedName;
-
 public class StreamLoadRecordMgr extends MasterDaemon {
     private static final Logger LOG = LogManager.getLogger(StreamLoadRecordMgr.class);
 
-    private class StreamLoadItem {
+    public class StreamLoadItem {
         private String label;
         private long dbId;
         private String finishTime;
@@ -89,6 +88,14 @@ public class StreamLoadRecordMgr extends MasterDaemon {
         public String getFinishTime() {
             return finishTime;
         }
+
+        public List<String> getStatistics() {
+            List<String> row = Lists.newArrayList();
+            row.add(label);
+            row.add(String.valueOf(dbId));
+            row.add(finishTime);
+            return row;
+        }
     }
 
     class StreamLoadComparator implements Comparator<StreamLoadItem> {
@@ -103,7 +110,7 @@ public class StreamLoadRecordMgr extends MasterDaemon {
 
 
     public StreamLoadRecordMgr(String name, long intervalMs) {
-            super(name, intervalMs);
+        super(name, intervalMs);
     }
 
     public void addStreamLoadRecord(long dbId, String label, StreamLoadRecord streamLoadRecord) {
@@ -111,15 +118,16 @@ public class StreamLoadRecordMgr extends MasterDaemon {
         while (isQueueFull()) {
             StreamLoadItem record = streamLoadRecordHeap.poll();
             if (record != null) {
-                String de_label = record.getLabel();
-                long de_dbId = record.getDbId();
+                String deLabel = record.getLabel();
+                long deDbId = record.getDbId();
 
-                Map<String, StreamLoadRecord> labelToStreamLoadRecord = dbIdToLabelToStreamLoadRecord.get(de_dbId);
-                Iterator<Map.Entry<String, StreamLoadRecord>> iter_record = labelToStreamLoadRecord.entrySet().iterator();
-                while (iter_record.hasNext()) {
-                    String labelInMap = iter_record.next().getKey();
-                    if (labelInMap.equals(de_label)) {
-                        iter_record.remove();
+                Map<String, StreamLoadRecord> labelToStreamLoadRecord = dbIdToLabelToStreamLoadRecord.get(deDbId);
+                Iterator<Map.Entry<String, StreamLoadRecord>> iterRecord
+                        = labelToStreamLoadRecord.entrySet().iterator();
+                while (iterRecord.hasNext()) {
+                    String labelInMap = iterRecord.next().getKey();
+                    if (labelInMap.equals(deLabel)) {
+                        iterRecord.remove();
                         break;
                     }
                 }
@@ -135,11 +143,18 @@ public class StreamLoadRecordMgr extends MasterDaemon {
         Map<String, StreamLoadRecord> labelToStreamLoadRecord = dbIdToLabelToStreamLoadRecord.get(dbId);
         if (!labelToStreamLoadRecord.containsKey(label)) {
             labelToStreamLoadRecord.put(label, streamLoadRecord);
+        } else if (labelToStreamLoadRecord.get(label).getFinishTime().compareTo(streamLoadRecord.getFinishTime()) < 0) {
+            labelToStreamLoadRecord.put(label, streamLoadRecord);
         }
         writeUnlock();
     }
 
-    public List<List<Comparable>> getStreamLoadRecordByDb(long dbId, String label, boolean accurateMatch, StreamLoadState state) {
+    public List<StreamLoadItem> getStreamLoadRecords() {
+        return new ArrayList<>(streamLoadRecordHeap);
+    }
+
+    public List<List<Comparable>> getStreamLoadRecordByDb(
+            long dbId, String label, boolean accurateMatch, StreamLoadState state) {
         LinkedList<List<Comparable>> streamLoadRecords = new LinkedList<List<Comparable>>();
 
         readLock();
@@ -172,6 +187,13 @@ public class StreamLoadRecordMgr extends MasterDaemon {
             for (StreamLoadRecord streamLoadRecord : streamLoadRecordList) {
                 try {
                     if (state != null && !String.valueOf(state).equalsIgnoreCase(streamLoadRecord.getStatus())) {
+                        continue;
+                    }
+                    // check auth
+                    if (!Env.getCurrentEnv().getAccessManager()
+                            .checkTblPriv(ConnectContext.get(), InternalCatalog.INTERNAL_CATALOG_NAME,
+                                    streamLoadRecord.getDb(), streamLoadRecord.getTable(),
+                                    PrivPredicate.LOAD)) {
                         continue;
                     }
                     streamLoadRecords.add(streamLoadRecord.getStreamLoadInfo());
@@ -217,11 +239,20 @@ public class StreamLoadRecordMgr extends MasterDaemon {
 
     @Override
     protected void runAfterCatalogReady() {
-        ImmutableMap<Long, Backend> backends = Catalog.getCurrentSystemInfo().getIdToBackend();
+        ImmutableMap<Long, Backend> backends;
+        try {
+            backends = Env.getCurrentSystemInfo().getAllBackendsByAllCluster();
+        } catch (AnalysisException e) {
+            LOG.warn("Failed to load backends from system info", e);
+            return;
+        }
         long start = System.currentTimeMillis();
         int pullRecordSize = 0;
         Map<Long, Long> beIdToLastStreamLoad = Maps.newHashMap();
         for (Backend backend : backends.values()) {
+            if (!backend.isAlive()) {
+                continue;
+            }
             BackendService.Client client = null;
             TNetworkAddress address = null;
             boolean ok = false;
@@ -233,26 +264,38 @@ public class StreamLoadRecordMgr extends MasterDaemon {
                 pullRecordSize += streamLoadRecordBatch.size();
                 long lastStreamLoadTime = -1;
                 for (Map.Entry<String, TStreamLoadRecord> entry : streamLoadRecordBatch.entrySet()) {
-                    TStreamLoadRecord streamLoadItem= entry.getValue();
-                    String startTime = TimeUtils.longToTimeString(streamLoadItem.getStartTime(), new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS"));
-                    String finishTime = TimeUtils.longToTimeString(streamLoadItem.getFinishTime(), new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS"));
+                    TStreamLoadRecord streamLoadItem = entry.getValue();
+                    String startTime = TimeUtils.longToTimeString(streamLoadItem.getStartTime(),
+                            TimeUtils.getDatetimeMsFormatWithTimeZone());
+                    String finishTime = TimeUtils.longToTimeString(streamLoadItem.getFinishTime(),
+                            TimeUtils.getDatetimeMsFormatWithTimeZone());
                     if (LOG.isDebugEnabled()) {
-                        LOG.debug("receive stream load record info from backend: {}. label: {}, db: {}, tbl: {}, user: {}, user_ip: {}," +
-                                        " status: {}, message: {}, error_url: {}, total_rows: {}, loaded_rows: {}, filtered_rows: {}," +
-                                        " unselected_rows: {}, load_bytes: {}, start_time: {}, finish_time: {}.",
-                                backend.getHost(), streamLoadItem.getLabel(), streamLoadItem.getDb(), streamLoadItem.getTbl(), streamLoadItem.getUser(), streamLoadItem.getUserIp(),
-                                streamLoadItem.getStatus(), streamLoadItem.getMessage(), streamLoadItem.getUrl(), streamLoadItem.getTotalRows(), streamLoadItem.getLoadedRows(),
-                                streamLoadItem.getFilteredRows(), streamLoadItem.getUnselectedRows(), streamLoadItem.getLoadBytes(), startTime, finishTime);
+                        LOG.debug("receive stream load record info from backend: {}."
+                                        + " label: {}, db: {}, tbl: {}, user: {}, user_ip: {},"
+                                        + " status: {}, message: {}, error_url: {},"
+                                        + " total_rows: {}, loaded_rows: {}, filtered_rows: {}, unselected_rows: {},"
+                                        + " load_bytes: {}, start_time: {}, finish_time: {}.",
+                                backend.getHost(), streamLoadItem.getLabel(), streamLoadItem.getDb(),
+                                streamLoadItem.getTbl(), streamLoadItem.getUser(), streamLoadItem.getUserIp(),
+                                streamLoadItem.getStatus(), streamLoadItem.getMessage(), streamLoadItem.getUrl(),
+                                streamLoadItem.getTotalRows(), streamLoadItem.getLoadedRows(),
+                                streamLoadItem.getFilteredRows(), streamLoadItem.getUnselectedRows(),
+                                streamLoadItem.getLoadBytes(), startTime, finishTime);
                     }
 
-                    AuditEvent auditEvent = new StreamLoadAuditEvent.AuditEventBuilder().setEventType(EventType.STREAM_LOAD_FINISH)
-                            .setLabel(streamLoadItem.getLabel()).setDb(streamLoadItem.getDb()).setTable(streamLoadItem.getTbl())
-                            .setUser(streamLoadItem.getUser()).setClientIp(streamLoadItem.getUserIp()).setStatus(streamLoadItem.getStatus())
-                            .setMessage(streamLoadItem.getMessage()).setUrl(streamLoadItem.getUrl()).setTotalRows(streamLoadItem.getTotalRows())
-                            .setLoadedRows(streamLoadItem.getLoadedRows()).setFilteredRows(streamLoadItem.getFilteredRows())
-                            .setUnselectedRows(streamLoadItem.getUnselectedRows()).setLoadBytes(streamLoadItem.getLoadBytes())
-                            .setStartTime(startTime).setFinishTime(finishTime).build();
-                    Catalog.getCurrentCatalog().getAuditEventProcessor().handleAuditEvent(auditEvent);
+                    AuditEvent auditEvent =
+                            new StreamLoadAuditEvent.AuditEventBuilder().setEventType(EventType.STREAM_LOAD_FINISH)
+                                    .setLabel(streamLoadItem.getLabel()).setDb(streamLoadItem.getDb())
+                                    .setTable(streamLoadItem.getTbl()).setUser(streamLoadItem.getUser())
+                                    .setClientIp(streamLoadItem.getUserIp()).setStatus(streamLoadItem.getStatus())
+                                    .setMessage(streamLoadItem.getMessage()).setUrl(streamLoadItem.getUrl())
+                                    .setTotalRows(streamLoadItem.getTotalRows())
+                                    .setLoadedRows(streamLoadItem.getLoadedRows())
+                                    .setFilteredRows(streamLoadItem.getFilteredRows())
+                                    .setUnselectedRows(streamLoadItem.getUnselectedRows())
+                                    .setLoadBytes(streamLoadItem.getLoadBytes()).setStartTime(startTime)
+                                    .setFinishTime(finishTime).build();
+                    Env.getCurrentEnv().getAuditEventProcessor().handleAuditEvent(auditEvent);
                     if (entry.getValue().getFinishTime() > lastStreamLoadTime) {
                         lastStreamLoadTime = entry.getValue().getFinishTime();
                     }
@@ -260,28 +303,30 @@ public class StreamLoadRecordMgr extends MasterDaemon {
                     if (Config.disable_show_stream_load) {
                         continue;
                     }
-                    StreamLoadRecord streamLoadRecord = new StreamLoadRecord(streamLoadItem.getLabel(), streamLoadItem.getDb(), streamLoadItem.getTbl(),
-                            streamLoadItem.getUser(), streamLoadItem.getUserIp(), streamLoadItem.getStatus(), streamLoadItem.getMessage(), streamLoadItem.getUrl(),
-                            String.valueOf(streamLoadItem.getTotalRows()), String.valueOf(streamLoadItem.getLoadedRows()),
-                            String.valueOf(streamLoadItem.getFilteredRows()), String.valueOf(streamLoadItem.getUnselectedRows()),
-                            String.valueOf(streamLoadItem.getLoadBytes()), startTime, finishTime);
+                    StreamLoadRecord streamLoadRecord =
+                            new StreamLoadRecord(streamLoadItem.getLabel(), streamLoadItem.getDb(),
+                                    streamLoadItem.getTbl(), streamLoadItem.getUserIp(),
+                                    streamLoadItem.getStatus(), streamLoadItem.getMessage(), streamLoadItem.getUrl(),
+                                    String.valueOf(streamLoadItem.getTotalRows()),
+                                    String.valueOf(streamLoadItem.getLoadedRows()),
+                                    String.valueOf(streamLoadItem.getFilteredRows()),
+                                    String.valueOf(streamLoadItem.getUnselectedRows()),
+                                    String.valueOf(streamLoadItem.getLoadBytes()),
+                                    startTime, finishTime, streamLoadItem.getUser(), streamLoadItem.getComment());
 
-                    String cluster = streamLoadItem.getCluster();
-                    if (Strings.isNullOrEmpty(cluster)) {
-                        cluster = SystemInfoService.DEFAULT_CLUSTER;
-                    }
-
-                    String fullDbName = ClusterNamespace.getFullName(cluster, streamLoadItem.getDb());
-                    Database db = Catalog.getCurrentCatalog().getDbNullable(fullDbName);
+                    String fullDbName = streamLoadItem.getDb();
+                    Database db = Env.getCurrentInternalCatalog().getDbNullable(fullDbName);
                     if (db == null) {
                         String dbName = fullDbName;
                         if (Strings.isNullOrEmpty(streamLoadItem.getCluster())) {
                             dbName = streamLoadItem.getDb();
                         }
-                        throw new UserException("unknown database, database=" + dbName);
+                        LOG.warn("unknown database, database=" + dbName);
+                        continue;
                     }
                     long dbId = db.getId();
-                    Catalog.getCurrentCatalog().getStreamLoadRecordMgr().addStreamLoadRecord(dbId, streamLoadItem.getLabel(), streamLoadRecord);
+                    Env.getCurrentEnv().getStreamLoadRecordMgr()
+                            .addStreamLoadRecord(dbId, streamLoadItem.getLabel(), streamLoadRecord);
                 }
 
                 if (streamLoadRecordBatch.size() > 0) {
@@ -306,21 +351,22 @@ public class StreamLoadRecordMgr extends MasterDaemon {
                                                         pullRecordSize, (System.currentTimeMillis() - start));
         if (pullRecordSize > 0) {
             FetchStreamLoadRecord fetchStreamLoadRecord = new FetchStreamLoadRecord(beIdToLastStreamLoad);
-            Catalog.getCurrentCatalog().getEditLog().logFetchStreamLoadRecord(fetchStreamLoadRecord);
+            Env.getCurrentEnv().getEditLog().logFetchStreamLoadRecord(fetchStreamLoadRecord);
         }
 
         if (Config.disable_show_stream_load) {
-            Catalog.getCurrentCatalog().getStreamLoadRecordMgr().clearStreamLoadRecord();
+            Env.getCurrentEnv().getStreamLoadRecordMgr().clearStreamLoadRecord();
         }
     }
 
-    public void replayFetchStreamLoadRecord(FetchStreamLoadRecord fetchStreamLoadRecord) {
-        ImmutableMap<Long, Backend> backends = Catalog.getCurrentSystemInfo().getIdToBackend();
+    public void replayFetchStreamLoadRecord(FetchStreamLoadRecord fetchStreamLoadRecord) throws AnalysisException {
+        ImmutableMap<Long, Backend> backends = Env.getCurrentSystemInfo().getAllBackendsByAllCluster();
         Map<Long, Long> beIdToLastStreamLoad = fetchStreamLoadRecord.getBeIdToLastStreamLoad();
         for (Backend backend : backends.values()) {
             if (beIdToLastStreamLoad.containsKey(backend.getId())) {
                 long lastStreamLoadTime = beIdToLastStreamLoad.get(backend.getId());
-                LOG.info("Replay stream load bdbje. backend: {}, last stream load time: {}", backend.getHost(), lastStreamLoadTime);
+                LOG.info("Replay stream load bdbje. backend: {}, last stream load time: {}",
+                        backend.getHost(), lastStreamLoadTime);
                 backend.setLastStreamLoadTime(lastStreamLoadTime);
             }
         }

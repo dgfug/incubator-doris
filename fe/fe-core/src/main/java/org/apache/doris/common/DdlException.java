@@ -22,6 +22,11 @@ public class DdlException extends UserException {
         super(msg);
     }
 
+    public DdlException(String msg, ErrorCode mysqlErrorCode) {
+        super(msg);
+        setMysqlErrorCode(mysqlErrorCode);
+    }
+
     public DdlException(String msg, Throwable e) {
         super(msg, e);
     }

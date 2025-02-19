@@ -17,58 +17,52 @@
 
 #include "exec/odbc_connector.h"
 
+#include <glog/logging.h>
+#include <sql.h>
 #include <sqlext.h>
+#include <wchar.h>
 
-#include <boost/algorithm/string.hpp>
-#include <codecvt>
+#include <ostream>
 
-#include "common/config.h"
-#include "common/logging.h"
-#include "exprs/expr.h"
-#include "runtime/primitive_type.h"
-#include "util/types.h"
+#include "common/status.h"
+#include "runtime/define_primitive_type.h"
+#include "runtime/descriptors.h"
+#include "runtime/types.h"
+#include "util/runtime_profile.h"
+#include "vec/exprs/vexpr.h"
+#include "vec/exprs/vexpr_context.h"
 
-#define ODBC_DISPOSE(h, ht, x, op)                                        \
-    {                                                                     \
-        auto rc = x;                                                      \
-        if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {           \
-            return error_status(op, handle_diagnostic_record(h, ht, rc)); \
-        }                                                                 \
-        if (rc == SQL_ERROR) {                                            \
-            auto err_msg = std::string("Error in") + std::string(op);     \
-            return Status::InternalError(err_msg.c_str());                \
-        }                                                                 \
+namespace doris {
+class RuntimeState;
+} // namespace doris
+
+#define ODBC_DISPOSE(h, ht, x, op)                                                        \
+    {                                                                                     \
+        auto rc = x;                                                                      \
+        if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {                           \
+            return error_status(fmt::to_string(op), handle_diagnostic_record(h, ht, rc)); \
+        }                                                                                 \
+        if (rc == SQL_ERROR) {                                                            \
+            auto err_msg = std::string("Error in") + fmt::to_string(op);                  \
+            return Status::InternalError(err_msg.c_str());                                \
+        }                                                                                 \
     }
-
-static constexpr uint32_t SMALL_COLUMN_SIZE_BUFFER = 100;
-// Now we only treat HLL, CHAR, VARCHAR as big column
-static constexpr uint32_t BIG_COLUMN_SIZE_BUFFER = 65535;
-// Default max buffer size use in insert to: 50MB, normally a batch is smaller than the size
-static constexpr uint32_t INSERT_BUFFER_SIZE = 1024l * 1024 * 50;
-
-static std::u16string utf8_to_wstring(const std::string& str) {
-    std::wstring_convert<std::codecvt_utf8<char16_t>, char16_t> utf8_ucs2_cvt;
-    return utf8_ucs2_cvt.from_bytes(str);
-}
 
 namespace doris {
 
 ODBCConnector::ODBCConnector(const ODBCConnectorParam& param)
-        : _connect_string(param.connect_string),
-          _sql_str(param.query_string),
-          _tuple_desc(param.tuple_desc),
-          _output_expr_ctxs(param.output_expr_ctxs),
-          _is_open(false),
+        : TableConnector(param.tuple_desc, param.use_transaction, param.table_name,
+                         param.query_string),
+          _connect_string(param.connect_string),
           _field_num(0),
-          _row_count(0),
           _env(nullptr),
           _dbc(nullptr),
           _stmt(nullptr) {}
 
-ODBCConnector::~ODBCConnector() {
+Status ODBCConnector::close(Status) {
     // do not commit transaction, roll back
     if (_is_in_transaction) {
-        abort_trans();
+        RETURN_IF_ERROR(abort_trans());
     }
 
     if (_stmt != nullptr) {
@@ -83,9 +77,53 @@ ODBCConnector::~ODBCConnector() {
     if (_env != nullptr) {
         SQLFreeHandle(SQL_HANDLE_ENV, _env);
     }
+
+    return Status::OK();
 }
 
-Status ODBCConnector::open() {
+Status ODBCConnector::append(vectorized::Block* block,
+                             const vectorized::VExprContextSPtrs& output_vexpr_ctxs,
+                             uint32_t start_send_row, uint32_t* num_rows_sent,
+                             TOdbcTableType::type table_type) {
+    _insert_stmt_buffer.clear();
+    std::u16string insert_stmt;
+    SCOPED_TIMER(_convert_tuple_timer);
+    fmt::format_to(_insert_stmt_buffer, "INSERT INTO {} VALUES (", _table_name);
+
+    int num_rows = block->rows();
+    int num_columns = block->columns();
+    for (int i = start_send_row; i < num_rows; ++i) {
+        (*num_rows_sent)++;
+
+        // Construct insert statement of odbc/jdbc table
+        for (int j = 0; j < num_columns; ++j) {
+            if (j != 0) {
+                fmt::format_to(_insert_stmt_buffer, "{}", ", ");
+            }
+            auto& column_ptr = block->get_by_position(j).column;
+            auto& type_ptr = block->get_by_position(j).type;
+            RETURN_IF_ERROR(convert_column_data(
+                    column_ptr, type_ptr, output_vexpr_ctxs[j]->root()->type(), i, table_type));
+        }
+
+        if (i < num_rows - 1 && _insert_stmt_buffer.size() < INSERT_BUFFER_SIZE) {
+            fmt::format_to(_insert_stmt_buffer, "{}", "),(");
+        } else {
+            // batch exhausted or _insert_stmt_buffer is full, need to do real insert stmt
+            fmt::format_to(_insert_stmt_buffer, "{}", ")");
+            break;
+        }
+    }
+    // Translate utf8 string to utf16 to use unicode encoding
+    insert_stmt = utf8_to_u16string(_insert_stmt_buffer.data(),
+                                    _insert_stmt_buffer.data() + _insert_stmt_buffer.size());
+
+    RETURN_IF_ERROR(exec_write_sql(insert_stmt, _insert_stmt_buffer));
+    COUNTER_UPDATE(_sent_rows_counter, *num_rows_sent);
+    return Status::OK();
+}
+
+Status ODBCConnector::open(RuntimeState* state, bool read) {
     if (_is_open) {
         LOG(INFO) << "this scanner already opened";
         return Status::OK();
@@ -107,13 +145,14 @@ Status ODBCConnector::open() {
     SQLSetConnectAttr(_dbc, SQL_ATTR_CONNECTION_TIMEOUT, (SQLPOINTER)timeout, 0);
     // Connect to the Database
     ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC,
-                 SQLDriverConnect(_dbc, NULL, (SQLCHAR*)_connect_string.c_str(), SQL_NTS, NULL, 0,
-                                  NULL, SQL_DRIVER_NOPROMPT),
+                 SQLDriverConnect(_dbc, nullptr, (SQLCHAR*)_connect_string.c_str(), SQL_NTS,
+                                  nullptr, 0, nullptr, SQL_DRIVER_NOPROMPT),
                  "driver connect");
 
     LOG(INFO) << "connect success:" << _connect_string.substr(0, _connect_string.find("Pwd="));
-
     _is_open = true;
+    RETURN_IF_ERROR(begin_trans());
+
     return Status::OK();
 }
 
@@ -127,7 +166,7 @@ Status ODBCConnector::query() {
                  "alloc statement");
 
     // Translate utf8 string to utf16 to use unicode encoding
-    auto wquery = utf8_to_wstring(_sql_str);
+    auto wquery = utf8_to_u16string(_sql_str.c_str(), _sql_str.c_str() + _sql_str.length());
     ODBC_DISPOSE(_stmt, SQL_HANDLE_STMT,
                  SQLExecDirectW(_stmt, (SQLWCHAR*)(wquery.c_str()), SQL_NTS), "exec direct");
 
@@ -154,18 +193,18 @@ Status ODBCConnector::query() {
         auto type = _tuple_desc->slots()[i]->type().type;
         column_data->buffer_length = (type == TYPE_HLL || type == TYPE_CHAR ||
                                       type == TYPE_VARCHAR || type == TYPE_STRING)
-                                             ? BIG_COLUMN_SIZE_BUFFER
-                                             : SMALL_COLUMN_SIZE_BUFFER;
+                                             ? big_column_size_buffer
+                                             : small_column_size_buffer;
         column_data->target_value_ptr = malloc(sizeof(char) * column_data->buffer_length);
-        _columns_data.push_back(column_data);
+        _columns_data.emplace_back(column_data);
     }
 
     // setup the binding
     for (int i = 0; i < _field_num; i++) {
         ODBC_DISPOSE(_stmt, SQL_HANDLE_STMT,
-                     SQLBindCol(_stmt, (SQLUSMALLINT)i + 1, _columns_data[i].target_type,
-                                _columns_data[i].target_value_ptr, _columns_data[i].buffer_length,
-                                &(_columns_data[i].strlen_or_ind)),
+                     SQLBindCol(_stmt, (SQLUSMALLINT)i + 1, _columns_data[i]->target_type,
+                                _columns_data[i]->target_value_ptr, _columns_data[i]->buffer_length,
+                                &(_columns_data[i]->strlen_or_ind)),
                      "bind col");
     }
 
@@ -188,18 +227,12 @@ Status ODBCConnector::get_next_row(bool* eos) {
     return Status::OK();
 }
 
-void ODBCConnector::_init_profile(doris::RuntimeProfile* profile) {
-    _convert_tuple_timer = ADD_TIMER(profile, "TupleConvertTime");
-    _result_send_timer = ADD_TIMER(profile, "ResultSendTime");
-    _sent_rows_counter = ADD_COUNTER(profile, "NumSentRows", TUnit::UNIT);
-}
-
 Status ODBCConnector::init_to_write(doris::RuntimeProfile* profile) {
     if (!_is_open) {
         return Status::InternalError("Init before open.");
     }
 
-    _init_profile(profile);
+    init_profile(profile);
     // Allocate a statement handle
     ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC, SQLAllocHandle(SQL_HANDLE_STMT, _dbc, &_stmt),
                  "alloc statement");
@@ -207,132 +240,23 @@ Status ODBCConnector::init_to_write(doris::RuntimeProfile* profile) {
     return Status::OK();
 }
 
-Status ODBCConnector::append(const std::string& table_name, RowBatch* batch,
-                             uint32_t start_send_row, uint32* num_rows_sent) {
-    _insert_stmt_buffer.clear();
-    std::u16string insert_stmt;
-    {
-        SCOPED_TIMER(_convert_tuple_timer);
-        fmt::format_to(_insert_stmt_buffer, "INSERT INTO {} VALUES (", table_name);
-
-        int num_rows = batch->num_rows();
-        for (int i = start_send_row; i < num_rows; ++i) {
-            auto row = batch->get_row(i);
-            (*num_rows_sent)++;
-
-            // Construct insert statement of odbc table
-            int num_columns = _output_expr_ctxs.size();
-            for (int j = 0; j < num_columns; ++j) {
-                if (j != 0) {
-                    fmt::format_to(_insert_stmt_buffer, "{}", ", ");
-                }
-                void* item = _output_expr_ctxs[j]->get_value(row);
-                if (item == nullptr) {
-                    fmt::format_to(_insert_stmt_buffer, "{}", "NULL");
-                    continue;
-                }
-                switch (_output_expr_ctxs[j]->root()->type().type) {
-                case TYPE_BOOLEAN:
-                case TYPE_TINYINT:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<int8_t*>(item));
-                    break;
-                case TYPE_SMALLINT:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<int16_t*>(item));
-                    break;
-                case TYPE_INT:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<int32_t*>(item));
-                    break;
-                case TYPE_BIGINT:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<int64_t*>(item));
-                    break;
-                case TYPE_FLOAT:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<float*>(item));
-                    break;
-                case TYPE_DOUBLE:
-                    fmt::format_to(_insert_stmt_buffer, "{}", *static_cast<double*>(item));
-                    break;
-                case TYPE_DATE:
-                case TYPE_DATETIME: {
-                    char buf[64];
-                    const auto* time_val = (const DateTimeValue*)(item);
-                    time_val->to_string(buf);
-                    fmt::format_to(_insert_stmt_buffer, "'{}'", buf);
-                    break;
-                }
-                case TYPE_VARCHAR:
-                case TYPE_CHAR:
-                case TYPE_STRING: {
-                    const auto* string_val = (const StringValue*)(item);
-
-                    if (string_val->ptr == NULL) {
-                        if (string_val->len == 0) {
-                            fmt::format_to(_insert_stmt_buffer, "{}", "''");
-                        } else {
-                            fmt::format_to(_insert_stmt_buffer, "{}", "NULL");
-                        }
-                    } else {
-                        fmt::format_to(_insert_stmt_buffer, "'{}'",
-                                       fmt::basic_string_view(string_val->ptr, string_val->len));
-                    }
-                    break;
-                }
-                case TYPE_DECIMALV2: {
-                    const DecimalV2Value decimal_val(
-                            reinterpret_cast<const PackedInt128*>(item)->value);
-                    char buffer[MAX_DECIMAL_WIDTH];
-                    int output_scale = _output_expr_ctxs[j]->root()->output_scale();
-                    int len = decimal_val.to_buffer(buffer, output_scale);
-                    _insert_stmt_buffer.append(buffer, buffer + len);
-                    break;
-                }
-                case TYPE_LARGEINT: {
-                    fmt::format_to(_insert_stmt_buffer, "{}",
-                                   reinterpret_cast<const PackedInt128*>(item)->value);
-                    break;
-                }
-                default: {
-                    fmt::memory_buffer err_out;
-                    fmt::format_to(err_out, "can't convert this type to mysql type. type = {}",
-                                   _output_expr_ctxs[j]->root()->type().type);
-                    return Status::InternalError(err_out.data());
-                }
-                }
-            }
-
-            if (i < num_rows - 1 && _insert_stmt_buffer.size() < INSERT_BUFFER_SIZE) {
-                fmt::format_to(_insert_stmt_buffer, "{}", "),(");
-            } else {
-                // batch exhausted or _insert_stmt_buffer is full, need to do real insert stmt
-                fmt::format_to(_insert_stmt_buffer, "{}", ")");
-                break;
-            }
-        }
-        // Translate utf8 string to utf16 to use unicode encodeing
-        insert_stmt = utf8_to_wstring(
-                std::string(_insert_stmt_buffer.data(),
-                            _insert_stmt_buffer.data() + _insert_stmt_buffer.size()));
-    }
-
-    {
-        SCOPED_TIMER(_result_send_timer);
-        ODBC_DISPOSE(_stmt, SQL_HANDLE_STMT,
-                     SQLExecDirectW(_stmt, (SQLWCHAR*)(insert_stmt.c_str()), SQL_NTS),
-                     _insert_stmt_buffer.data());
-    }
-    COUNTER_UPDATE(_sent_rows_counter, *num_rows_sent);
+Status ODBCConnector::exec_write_sql(const std::u16string& insert_stmt,
+                                     const fmt::memory_buffer& insert_stmt_buffer) {
+    SCOPED_TIMER(_result_send_timer);
+    ODBC_DISPOSE(_stmt, SQL_HANDLE_STMT,
+                 SQLExecDirectW(_stmt, (SQLWCHAR*)(insert_stmt.c_str()), SQL_NTS),
+                 insert_stmt_buffer.data());
     return Status::OK();
 }
 
 Status ODBCConnector::begin_trans() {
-    if (!_is_open) {
-        return Status::InternalError("Begin transaction before open.");
+    if (_use_tranaction) {
+        ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC,
+                     SQLSetConnectAttr(_dbc, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_OFF,
+                                       SQL_IS_UINTEGER),
+                     "Begin transcation");
+        _is_in_transaction = true;
     }
-
-    ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC,
-                 SQLSetConnectAttr(_dbc, SQL_ATTR_AUTOCOMMIT, (SQLPOINTER)SQL_AUTOCOMMIT_OFF,
-                                   SQL_IS_UINTEGER),
-                 "Begin transcation");
-    _is_in_transaction = true;
 
     return Status::OK();
 }
@@ -345,17 +269,17 @@ Status ODBCConnector::abort_trans() {
     ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC, SQLEndTran(SQL_HANDLE_DBC, _dbc, SQL_ROLLBACK),
                  "Abort transcation");
 
+    _is_in_transaction = false;
+
     return Status::OK();
 }
 
 Status ODBCConnector::finish_trans() {
-    if (!_is_in_transaction) {
-        return Status::InternalError("Abort transaction before begin trans.");
+    if (_use_tranaction && _is_in_transaction) {
+        ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC, SQLEndTran(SQL_HANDLE_DBC, _dbc, SQL_COMMIT),
+                     "commit transcation");
+        _is_in_transaction = false;
     }
-
-    ODBC_DISPOSE(_dbc, SQL_HANDLE_DBC, SQLEndTran(SQL_HANDLE_DBC, _dbc, SQL_COMMIT),
-                 "commit transcation");
-    _is_in_transaction = false;
 
     return Status::OK();
 }
@@ -389,12 +313,10 @@ std::string ODBCConnector::handle_diagnostic_record(SQLHANDLE hHandle, SQLSMALLI
     while (SQLGetDiagRec(hType, hHandle, ++rec, (SQLCHAR*)(state), &error,
                          reinterpret_cast<SQLCHAR*>(message),
                          (SQLSMALLINT)(sizeof(message) / sizeof(WCHAR)),
-                         (SQLSMALLINT*)NULL) == SQL_SUCCESS) {
+                         (SQLSMALLINT*)nullptr) == SQL_SUCCESS) {
         // Hide data truncated..
         if (wcsncmp(reinterpret_cast<const wchar_t*>(state), L"01004", 5)) {
-            boost::format msg_string("%s %s (%d)");
-            msg_string % state % message % error;
-            diagnostic_msg += msg_string.str();
+            diagnostic_msg += fmt::format("{} {} ({})", state, message, error);
         }
     }
 

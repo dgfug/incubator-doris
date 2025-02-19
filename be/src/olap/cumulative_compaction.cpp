@@ -17,121 +17,174 @@
 
 #include "olap/cumulative_compaction.h"
 
+#include <memory>
+#include <mutex>
+#include <ostream>
+
+#include "common/config.h"
+#include "common/logging.h"
+#include "olap/cumulative_compaction_policy.h"
+#include "olap/cumulative_compaction_time_series_policy.h"
+#include "olap/olap_define.h"
+#include "olap/rowset/rowset_meta.h"
+#include "olap/tablet.h"
+#include "runtime/thread_context.h"
 #include "util/doris_metrics.h"
 #include "util/time.h"
 #include "util/trace.h"
 
 namespace doris {
+using namespace ErrorCode;
 
-CumulativeCompaction::CumulativeCompaction(TabletSharedPtr tablet, const std::string& label,
-                                           const std::shared_ptr<MemTracker>& parent_tracker)
-        : Compaction(tablet, label, parent_tracker) {}
-
-CumulativeCompaction::~CumulativeCompaction() {}
-
-OLAPStatus CumulativeCompaction::prepare_compact() {
-    if (!_tablet->init_succeeded()) {
-        return OLAP_ERR_CUMULATIVE_INVALID_PARAMETERS;
+void CumulativeCompaction::find_longest_consecutive_version(std::vector<RowsetSharedPtr>* rowsets,
+                                                            std::vector<Version>* missing_version) {
+    if (rowsets->empty()) {
+        return;
     }
 
-    MutexLock lock(_tablet->get_cumulative_lock(), TRY_LOCK);
-    if (!lock.own_lock()) {
-        LOG(INFO) << "The tablet is under cumulative compaction. tablet=" << _tablet->full_name();
-        return OLAP_ERR_CE_TRY_CE_LOCK_ERROR;
+    RowsetSharedPtr prev_rowset = rowsets->front();
+    size_t i = 1;
+    int max_start = 0;
+    int max_length = 1;
+
+    int start = 0;
+    int length = 1;
+    for (; i < rowsets->size(); ++i) {
+        RowsetSharedPtr rowset = (*rowsets)[i];
+        if (rowset->start_version() != prev_rowset->end_version() + 1) {
+            if (missing_version != nullptr) {
+                missing_version->push_back(prev_rowset->version());
+                missing_version->push_back(rowset->version());
+            }
+            start = i;
+            length = 1;
+        } else {
+            length++;
+        }
+
+        if (length > max_length) {
+            max_start = start;
+            max_length = length;
+        }
+
+        prev_rowset = rowset;
     }
-    TRACE("got cumulative compaction lock");
-
-    // 1. calculate cumulative point
-    _tablet->calculate_cumulative_point();
-    TRACE("calculated cumulative point");
-    VLOG_CRITICAL << "after calculate, current cumulative point is " << _tablet->cumulative_layer_point()
-            << ", tablet=" << _tablet->full_name();
-
-    // 2. pick rowsets to compact
-    RETURN_NOT_OK(pick_rowsets_to_compact());
-    TRACE("rowsets picked");
-    TRACE_COUNTER_INCREMENT("input_rowsets_count", _input_rowsets.size());
-    _tablet->set_clone_occurred(false);
-
-    return OLAP_SUCCESS;
+    *rowsets = {rowsets->begin() + max_start, rowsets->begin() + max_start + max_length};
 }
 
-OLAPStatus CumulativeCompaction::execute_compact_impl() {
-    MutexLock lock(_tablet->get_cumulative_lock(), TRY_LOCK);
-    if (!lock.own_lock()) {
-        LOG(INFO) << "The tablet is under cumulative compaction. tablet=" << _tablet->full_name();
-        return OLAP_ERR_CE_TRY_CE_LOCK_ERROR;
-    }
-    TRACE("got cumulative compaction lock");
+CumulativeCompaction::CumulativeCompaction(StorageEngine& engine, const TabletSharedPtr& tablet)
+        : CompactionMixin(engine, tablet,
+                          "CumulativeCompaction:" + std::to_string(tablet->tablet_id())) {}
 
-    // Clone task may happen after compaction task is submitted to thread pool, and rowsets picked
-    // for compaction may change. In this case, current compaction task should not be executed.
-    if (_tablet->get_clone_occurred()) {
-        _tablet->set_clone_occurred(false);
-        return OLAP_ERR_CUMULATIVE_CLONE_OCCURRED;
+CumulativeCompaction::~CumulativeCompaction() = default;
+
+Status CumulativeCompaction::prepare_compact() {
+    if (!tablet()->init_succeeded()) {
+        return Status::Error<CUMULATIVE_INVALID_PARAMETERS, false>("_tablet init failed");
     }
 
-    // 3. do cumulative compaction, merge rowsets
-    int64_t permits = get_compaction_permits();
-    RETURN_NOT_OK(do_compaction(permits));
-    TRACE("compaction finished");
+    std::unique_lock<std::mutex> lock(tablet()->get_cumulative_compaction_lock(), std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return Status::Error<TRY_LOCK_FAILED, false>(
+                "The tablet is under cumulative compaction. tablet={}", _tablet->tablet_id());
+    }
 
-    // 4. set state to success
-    _state = CompactionState::SUCCESS;
+    tablet()->calculate_cumulative_point();
+    VLOG_CRITICAL << "after calculate, current cumulative point is "
+                  << tablet()->cumulative_layer_point() << ", tablet=" << _tablet->tablet_id();
 
-    // 5. set cumulative point
-    _tablet->cumulative_compaction_policy()->update_cumulative_point(
-            _tablet.get(), _input_rowsets, _output_rowset, _last_delete_version);
+    RETURN_IF_ERROR(pick_rowsets_to_compact());
+    COUNTER_UPDATE(_input_rowsets_counter, _input_rowsets.size());
+
+    return Status::OK();
+}
+
+Status CumulativeCompaction::execute_compact() {
+    DBUG_EXECUTE_IF("CumulativeCompaction::execute_compact.block", {
+        auto target_tablet_id = dp->param<int64_t>("tablet_id", -1);
+        if (target_tablet_id == _tablet->tablet_id()) {
+            LOG(INFO) << "start debug block "
+                      << "CumulativeCompaction::execute_compact.block";
+            while (DebugPoints::instance()->is_enable(
+                    "CumulativeCompaction::execute_compact.block")) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            LOG(INFO) << "end debug block "
+                      << "CumulativeCompaction::execute_compact.block";
+        }
+    })
+
+    std::unique_lock<std::mutex> lock(tablet()->get_cumulative_compaction_lock(), std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return Status::Error<TRY_LOCK_FAILED, false>(
+                "The tablet is under cumulative compaction. tablet={}", _tablet->tablet_id());
+    }
+
+    SCOPED_ATTACH_TASK(_mem_tracker);
+
+    RETURN_IF_ERROR(CompactionMixin::execute_compact());
+    DCHECK_EQ(_state, CompactionState::SUCCESS);
+
+    tablet()->cumulative_compaction_policy()->update_cumulative_point(
+            tablet(), _input_rowsets, _output_rowset, _last_delete_version);
     VLOG_CRITICAL << "after cumulative compaction, current cumulative point is "
-              << _tablet->cumulative_layer_point() << ", tablet=" << _tablet->full_name();
-
-    // 6. add metric to cumulative compaction
+                  << tablet()->cumulative_layer_point() << ", tablet=" << _tablet->tablet_id();
+    // TIME_SERIES_POLICY, generating an empty rowset doesn't need to update the timestamp.
+    if (!(tablet()->tablet_meta()->compaction_policy() == CUMULATIVE_TIME_SERIES_POLICY &&
+          _output_rowset->num_segments() == 0)) {
+        tablet()->set_last_cumu_compaction_success_time(UnixMillis());
+    }
     DorisMetrics::instance()->cumulative_compaction_deltas_total->increment(_input_rowsets.size());
-    DorisMetrics::instance()->cumulative_compaction_bytes_total->increment(_input_rowsets_size);
-    TRACE("save cumulative compaction metrics");
+    DorisMetrics::instance()->cumulative_compaction_bytes_total->increment(
+            _input_rowsets_total_size);
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus CumulativeCompaction::pick_rowsets_to_compact() {
-    std::vector<RowsetSharedPtr> candidate_rowsets;
-
-    _tablet->pick_candidate_rowsets_to_cumulative_compaction(
-            config::cumulative_compaction_skip_window_seconds, &candidate_rowsets);
-
+Status CumulativeCompaction::pick_rowsets_to_compact() {
+    auto candidate_rowsets = tablet()->pick_candidate_rowsets_to_cumulative_compaction();
     if (candidate_rowsets.empty()) {
-        return OLAP_ERR_CUMULATIVE_NO_SUITABLE_VERSIONS;
+        return Status::Error<CUMULATIVE_NO_SUITABLE_VERSION>("candidate_rowsets is empty");
     }
 
-    // candidate_rowsets may not be continuous. Because some rowset may not be selected
-    // because the protection time has not expired(config::cumulative_compaction_skip_window_seconds).
+    // candidate_rowsets may not be continuous
     // So we need to choose the longest continuous path from it.
     std::vector<Version> missing_versions;
-    RETURN_NOT_OK(find_longest_consecutive_version(&candidate_rowsets, &missing_versions));
+    find_longest_consecutive_version(&candidate_rowsets, &missing_versions);
     if (!missing_versions.empty()) {
-        DCHECK(missing_versions.size() == 2);
+        DCHECK(missing_versions.size() % 2 == 0);
         LOG(WARNING) << "There are missed versions among rowsets. "
-                     << "prev rowset verison=" << missing_versions[0]
-                     << ", next rowset version=" << missing_versions[1]
-                     << ", tablet=" << _tablet->full_name();
+                     << "total missed version size: " << missing_versions.size() / 2
+                     << ", first missed version prev rowset verison=" << missing_versions[0]
+                     << ", first missed version next rowset version=" << missing_versions[1]
+                     << ", tablet=" << _tablet->tablet_id();
+    }
+
+    int64_t max_score = config::cumulative_compaction_max_deltas;
+    auto process_memory_usage = doris::GlobalMemoryArbitrator::process_memory_usage();
+    bool memory_usage_high = process_memory_usage > MemInfo::soft_mem_limit() * 0.8;
+    if (tablet()->last_compaction_status.is<ErrorCode::MEM_LIMIT_EXCEEDED>() || memory_usage_high) {
+        max_score = std::max(config::cumulative_compaction_max_deltas /
+                                     config::cumulative_compaction_max_deltas_factor,
+                             config::cumulative_compaction_min_deltas + 1);
     }
 
     size_t compaction_score = 0;
-    int transient_size = _tablet->cumulative_compaction_policy()->pick_input_rowsets(
-            _tablet.get(), candidate_rowsets,
-            config::max_cumulative_compaction_num_singleton_deltas,
-            config::min_cumulative_compaction_num_singleton_deltas, &_input_rowsets,
-            &_last_delete_version, &compaction_score);
+    tablet()->cumulative_compaction_policy()->pick_input_rowsets(
+            tablet(), candidate_rowsets, max_score, config::cumulative_compaction_min_deltas,
+            &_input_rowsets, &_last_delete_version, &compaction_score,
+            _allow_delete_in_cumu_compaction);
 
     // Cumulative compaction will process with at least 1 rowset.
-    // So when there is no rowset being chosen, we should return OLAP_ERR_CUMULATIVE_NO_SUITABLE_VERSIONS:
+    // So when there is no rowset being chosen, we should return Status::Error<CUMULATIVE_NO_SUITABLE_VERSION>():
     if (_input_rowsets.empty()) {
         if (_last_delete_version.first != -1) {
             // we meet a delete version, should increase the cumulative point to let base compaction handle the delete version.
             // plus 1 to skip the delete version.
             // NOTICE: after that, the cumulative point may be larger than max version of this tablet, but it doesn't matter.
-            _tablet->set_cumulative_layer_point(_last_delete_version.first + 1);
-            return OLAP_ERR_CUMULATIVE_NO_SUITABLE_VERSIONS;
+            tablet()->set_cumulative_layer_point(_last_delete_version.first + 1);
+            return Status::Error<CUMULATIVE_NO_SUITABLE_VERSION>(
+                    "_last_delete_version.first not equal to -1");
         }
 
         // we did not meet any delete version. which means compaction_score is not enough to do cumulative compaction.
@@ -141,44 +194,40 @@ OLAPStatus CumulativeCompaction::pick_rowsets_to_compact() {
 
         // check both last success time of base and cumulative compaction
         int64_t now = UnixMillis();
-        int64_t last_cumu = _tablet->last_cumu_compaction_success_time();
-        int64_t last_base = _tablet->last_base_compaction_success_time();
+        int64_t last_cumu = tablet()->last_cumu_compaction_success_time();
+        int64_t last_base = tablet()->last_base_compaction_success_time();
         if (last_cumu != 0 || last_base != 0) {
-            int64_t interval_threshold =
-                    config::base_compaction_interval_seconds_since_last_operation * 1000;
+            int64_t interval_threshold = config::pick_rowset_to_compact_interval_sec * 1000;
             int64_t cumu_interval = now - last_cumu;
             int64_t base_interval = now - last_base;
             if (cumu_interval > interval_threshold && base_interval > interval_threshold) {
                 // before increasing cumulative point, we should make sure all rowsets are non-overlapping.
                 // if at least one rowset is overlapping, we should compact them first.
-                CHECK(candidate_rowsets.size() == transient_size)
-                        << "tablet: " << _tablet->full_name() << ", " << candidate_rowsets.size()
-                        << " vs. " << transient_size;
                 for (auto& rs : candidate_rowsets) {
                     if (rs->rowset_meta()->is_segments_overlapping()) {
                         _input_rowsets = candidate_rowsets;
-                        return OLAP_SUCCESS;
+                        return Status::OK();
                     }
                 }
 
                 // all candidate rowsets are non-overlapping, increase the cumulative point
-                _tablet->set_cumulative_layer_point(candidate_rowsets.back()->start_version() + 1);
+                tablet()->set_cumulative_layer_point(candidate_rowsets.back()->start_version() + 1);
             }
         } else {
             // init the compaction success time for first time
             if (last_cumu == 0) {
-                _tablet->set_last_cumu_compaction_success_time(now);
+                tablet()->set_last_cumu_compaction_success_time(now);
             }
 
             if (last_base == 0) {
-                _tablet->set_last_base_compaction_success_time(now);
+                tablet()->set_last_base_compaction_success_time(now);
             }
         }
 
-        return OLAP_ERR_CUMULATIVE_NO_SUITABLE_VERSIONS;
+        return Status::Error<CUMULATIVE_NO_SUITABLE_VERSION>("_input_rowsets is empty");
     }
 
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
 } // namespace doris

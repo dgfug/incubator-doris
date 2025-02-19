@@ -18,6 +18,7 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.common.DdlException;
+import org.apache.doris.datasource.property.constants.HMSProperties;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -53,7 +54,8 @@ public class HiveTableTest {
     public void testNormal() throws DdlException {
         HiveTable table = new HiveTable(1000, "hive_table", columns, properties);
         Assert.assertEquals(String.format("%s.%s", hiveDb, hiveTable), table.getHiveDbTable());
-        Assert.assertEquals(1, table.getHiveProperties().size());
+        // HiveProperties={hadoop.security.authentication=simple, hive.metastore.uris=thrift://127.0.0.1:9083}
+        Assert.assertEquals(2, table.getHiveProperties().size());
     }
 
     @Test(expected = DdlException.class)
@@ -75,5 +77,12 @@ public class HiveTableTest {
         properties.remove("hive.metastore.uris");
         new HiveTable(1000, "hive_table", columns, properties);
         Assert.fail("No exception throws.");
+    }
+
+    @Test()
+    public void testVersion() throws DdlException {
+        properties.put(HMSProperties.HIVE_VERSION, "2.1.2");
+        HiveTable table = new HiveTable(1000, "hive_table", columns, properties);
+        Assert.assertEquals("2.1.2", table.getHiveProperties().get(HMSProperties.HIVE_VERSION));
     }
 }

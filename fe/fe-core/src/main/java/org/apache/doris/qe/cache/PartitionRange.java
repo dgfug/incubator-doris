@@ -17,37 +17,39 @@
 
 package org.apache.doris.qe.cache;
 
-import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.BinaryPredicate;
+import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.DateLiteral;
-import org.apache.doris.analysis.InPredicate;
-import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.Expr;
-import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.analysis.InPredicate;
 import org.apache.doris.analysis.IntLiteral;
-import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.PartitionItem;
-import org.apache.doris.catalog.PrimitiveType;
-import org.apache.doris.catalog.RangePartitionInfo;
+import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionKey;
+import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.RangePartitionItem;
 import org.apache.doris.catalog.Type;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.planner.PartitionColumnFilter;
 
-import org.apache.doris.common.AnalysisException;
-
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Convert the range of the partition to the list
@@ -119,7 +121,7 @@ public class PartitionRange {
             this.tooNew = false;
         }
 
-        public void Debug() {
+        public void debug() {
             if (partition != null) {
                 LOG.info("partition id {}, cacheKey {}, version {}, time {}, fromCache {}, tooNew {} ",
                         partitionId, cacheKey.realValue(),
@@ -141,25 +143,36 @@ public class PartitionRange {
     }
 
     public static class PartitionKeyType {
-        private SimpleDateFormat df8 = new SimpleDateFormat("yyyyMMdd");
-        private SimpleDateFormat df10 = new SimpleDateFormat("yyyy-MM-dd");
+        private DateTimeFormatter df8 = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneId.systemDefault());
+        private DateTimeFormatter df10 = DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault());
 
         public KeyType keyType = KeyType.DEFAULT;
         public long value;
         public Date date;
 
         public boolean init(Type type, String str) {
-            if (type.getPrimitiveType() == PrimitiveType.DATE) {
-                try {
-                    date = df10.parse(str);
-                } catch (Exception e) {
-                    LOG.warn("parse error str{}.", str);
+            switch (type.getPrimitiveType()) {
+                case DATE:
+                case DATEV2:
+                    try {
+                        date = Date.from(
+                                LocalDate.parse(str, df10).atStartOfDay().atZone(ZoneId.systemDefault()).toInstant());
+                    } catch (Exception e) {
+                        LOG.warn("parse error str{}.", str);
+                        return false;
+                    }
+                    keyType = KeyType.DATE;
+                    break;
+                case TINYINT:
+                case SMALLINT:
+                case INT:
+                case BIGINT:
+                    value = Long.parseLong(str);
+                    keyType = KeyType.LONG;
+                    break;
+                default:
+                    LOG.info("PartitionCache not support such key type {}", type.toSql());
                     return false;
-                }
-                keyType = KeyType.DATE;
-            } else {
-                value = Long.valueOf(str);
-                keyType = KeyType.LONG;
             }
             return true;
         }
@@ -168,10 +181,16 @@ public class PartitionRange {
             switch (type.getPrimitiveType()) {
                 case BOOLEAN:
                 case TIME:
+                case TIMEV2:
                 case DATETIME:
+                case DATETIMEV2:
                 case FLOAT:
                 case DOUBLE:
                 case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
+                case DECIMAL256:
                 case CHAR:
                 case VARCHAR:
                 case STRING:
@@ -179,6 +198,7 @@ public class PartitionRange {
                     LOG.info("PartitionCache not support such key type {}", type.toSql());
                     return false;
                 case DATE:
+                case DATEV2:
                     date = getDateValue(expr);
                     keyType = KeyType.DATE;
                     break;
@@ -189,6 +209,8 @@ public class PartitionRange {
                     value = expr.getLongValue();
                     keyType = KeyType.LONG;
                     break;
+                default:
+                    return true;
             }
             return true;
         }
@@ -197,10 +219,6 @@ public class PartitionRange {
             keyType = key.keyType;
             value = key.value;
             date = key.date;
-        }
-
-        public boolean equals(PartitionKeyType key) {
-            return realValue() == key.realValue();
         }
 
         public void add(int num) {
@@ -215,7 +233,7 @@ public class PartitionRange {
             if (keyType == KeyType.DEFAULT) {
                 return "";
             } else if (keyType == KeyType.DATE) {
-                return df10.format(date);
+                return df10.format(LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault()));
             } else {
                 return String.valueOf(value);
             }
@@ -223,18 +241,21 @@ public class PartitionRange {
 
         public long realValue() {
             if (keyType == KeyType.DATE) {
-                return Long.parseLong(df8.format(date));
+                return Long.parseLong(df8.format(LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault())));
             } else {
                 return value;
             }
         }
 
         private Date getDateValue(LiteralExpr expr) {
-            value = expr.getLongValue() / 1000000;
+            Preconditions.checkArgument(expr.getType() == Type.DATE || expr.getType() == Type.DATEV2);
+            value = expr.getLongValue();
             Date dt = null;
             try {
-                dt = df8.parse(String.valueOf(value));
+                dt = Date.from(LocalDate.parse(String.valueOf(value), df8).atStartOfDay().atZone(ZoneId.systemDefault())
+                        .toInstant());
             } catch (Exception e) {
+                // CHECKSTYLE IGNORE THIS LINE
             }
             return dt;
         }
@@ -345,8 +366,10 @@ public class PartitionRange {
     }
 
     /**
-     * Only the range query of the key of the partition is supported, and the separated partition key query is not supported.
-     * Because a query can only be divided into two parts, part1 get data from cache, part2 fetch_data by scan node from BE.
+     * Only the range query of the key of the partition is supported, and the separated partition key query is not
+     * supported.
+     * Because a query can only be divided into two parts, part1 get data from cache, part2 fetch_data by scan node
+     * from BE.
      * Partition cache : 20191211-20191215
      * Hit cache parameter : [20191211 - 20191215], [20191212 - 20191214], [20191212 - 20191216],[20191210 - 20191215]
      * Miss cache parameter: [20191210 - 20191216]
@@ -404,7 +427,9 @@ public class PartitionRange {
 
     public boolean rewritePredicate(CompoundPredicate predicate, List<PartitionSingle> rangeList) {
         if (predicate.getOp() != CompoundPredicate.Operator.AND) {
-            LOG.debug("predicate op {}", predicate.getOp().toString());
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("predicate op {}", predicate.getOp().toString());
+            }
             return false;
         }
         for (Expr expr : predicate.getChildren()) {
@@ -495,6 +520,10 @@ public class PartitionRange {
         for (PartitionSingle single : partitionSingleList) {
             single.setPartition(table.getPartition(single.getPartitionId()));
         }
+
+        // filter the partitions in predicate but not in OlapTable
+        partitionSingleList =
+                partitionSingleList.stream().filter(p -> p.getPartition() != null).collect(Collectors.toList());
     }
 
     /**
@@ -543,11 +572,12 @@ public class PartitionRange {
     private PartitionColumnFilter createPartitionFilter(CompoundPredicate partitionKeyPredicate,
                                                         Column partitionColumn) {
         if (partitionKeyPredicate.getOp() != CompoundPredicate.Operator.AND) {
-            LOG.debug("not and op");
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("not and op");
+            }
             return null;
         }
         PartitionColumnFilter partitionColumnFilter = new PartitionColumnFilter();
-        ;
         for (Expr expr : partitionKeyPredicate.getChildren()) {
             if (expr instanceof BinaryPredicate) {
                 BinaryPredicate binPredicate = (BinaryPredicate) expr;
@@ -557,7 +587,9 @@ public class PartitionRange {
                     continue;
                 }
                 if (binPredicate.getOp() == BinaryPredicate.Operator.NE) {
-                    LOG.debug("not support NE operator");
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("not support NE operator");
+                    }
                     continue;
                 }
                 Expr slotBinding;
@@ -566,7 +598,9 @@ public class PartitionRange {
                 } else if (binPredicate.getChild(0) instanceof LiteralExpr) {
                     slotBinding = binPredicate.getChild(0);
                 } else {
-                    LOG.debug("not find LiteralExpr");
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug("not find LiteralExpr");
+                    }
                     continue;
                 }
 

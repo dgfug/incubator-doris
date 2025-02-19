@@ -18,7 +18,6 @@
 package org.apache.doris.common.util;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -61,8 +60,8 @@ public class MysqlUtil {
         try {
             conn = DriverManager.getConnection(url, user, passwd);
         } catch (SQLException e) {
-            LOG.warn("fail to get connection to mysql. url={}, user={}, passwd={}, exception={}",
-                    url, user, passwd, e.getMessage());
+            LOG.warn("fail to get connection to mysql. url={}, user={}, exception={}",
+                    url, user, e.getMessage());
             return null;
         }
         return conn;
@@ -78,4 +77,3 @@ public class MysqlUtil {
         }
     }
 }
-

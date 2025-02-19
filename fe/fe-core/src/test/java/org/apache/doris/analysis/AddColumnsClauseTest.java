@@ -23,7 +23,6 @@ import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 
 import com.google.common.collect.Lists;
-
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -49,21 +48,21 @@ public class AddColumnsClauseTest {
         columns.add(definition);
         AddColumnsClause clause = new AddColumnsClause(columns, null, null);
         clause.analyze(analyzer);
-        Assert.assertEquals("ADD COLUMN (`col1` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\", "
-                + "`col2` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\")", clause.toString());
+        Assert.assertEquals("ADD COLUMN (`col1` int NOT NULL DEFAULT \"0\" COMMENT \"\", "
+                + "`col2` int NOT NULL DEFAULT \"0\" COMMENT \"\")", clause.toString());
 
         clause = new AddColumnsClause(columns, "", null);
         clause.analyze(analyzer);
-        Assert.assertEquals("ADD COLUMN (`col1` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\", "
-                + "`col2` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\")",
+        Assert.assertEquals("ADD COLUMN (`col1` int NOT NULL DEFAULT \"0\" COMMENT \"\", "
+                + "`col2` int NOT NULL DEFAULT \"0\" COMMENT \"\")",
                             clause.toString());
         Assert.assertNull(clause.getRollupName());
 
         clause = new AddColumnsClause(columns, "testTable", null);
         clause.analyze(analyzer);
 
-        Assert.assertEquals("ADD COLUMN (`col1` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\", "
-                + "`col2` int(11) NOT NULL DEFAULT \"0\" COMMENT \"\") IN `testTable`",
+        Assert.assertEquals("ADD COLUMN (`col1` int NOT NULL DEFAULT \"0\" COMMENT \"\", "
+                + "`col2` int NOT NULL DEFAULT \"0\" COMMENT \"\") IN `testTable`",
                 clause.toString());
         Assert.assertNull(clause.getProperties());
         Assert.assertEquals("testTable", clause.getRollupName());

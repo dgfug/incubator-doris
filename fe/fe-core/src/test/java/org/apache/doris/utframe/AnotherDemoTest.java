@@ -19,12 +19,13 @@ package org.apache.doris.utframe;
 
 import org.apache.doris.analysis.CreateDbStmt;
 import org.apache.doris.analysis.CreateTableStmt;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
+import org.apache.doris.planner.ExchangeNode;
 import org.apache.doris.planner.OlapScanNode;
 import org.apache.doris.planner.PlanFragment;
 import org.apache.doris.planner.Planner;
@@ -44,7 +45,7 @@ import java.util.List;
 import java.util.UUID;
 
 /*
- * This demo is mainly used to confirm that 
+ * This demo is mainly used to confirm that
  * repeatedly starting FE and BE in 2 UnitTest will not cause conflict
  */
 public class AnotherDemoTest {
@@ -52,12 +53,14 @@ public class AnotherDemoTest {
     private static int fe_http_port;
     private static int fe_rpc_port;
     private static int fe_query_port;
+    private static int fe_arrow_flight_sql_port;
     private static int fe_edit_log_port;
 
     private static int be_heartbeat_port;
     private static int be_thrift_port;
     private static int be_brpc_port;
     private static int be_http_port;
+    private static int be_arrow_flight_sql_port;
 
     // use a unique dir so that it won't be conflict with other unit test which
     // may also start a Mocked Frontend
@@ -72,7 +75,7 @@ public class AnotherDemoTest {
     }
 
     @AfterClass
-    public static void TearDown() {
+    public static void tearDown() {
         UtFrameUtils.cleanDorisFeDir(runningDir);
     }
 
@@ -81,12 +84,14 @@ public class AnotherDemoTest {
         fe_http_port = UtFrameUtils.findValidPort();
         fe_rpc_port = UtFrameUtils.findValidPort();
         fe_query_port = UtFrameUtils.findValidPort();
+        fe_arrow_flight_sql_port = UtFrameUtils.findValidPort();
         fe_edit_log_port = UtFrameUtils.findValidPort();
 
         be_heartbeat_port = UtFrameUtils.findValidPort();
         be_thrift_port = UtFrameUtils.findValidPort();
         be_brpc_port = UtFrameUtils.findValidPort();
         be_http_port = UtFrameUtils.findValidPort();
+        be_arrow_flight_sql_port = UtFrameUtils.findValidPort();
     }
 
     @Test
@@ -96,15 +101,15 @@ public class AnotherDemoTest {
         // 2. create database db1
         String createDbStmtStr = "create database db1;";
         CreateDbStmt createDbStmt = (CreateDbStmt) UtFrameUtils.parseAndAnalyzeStmt(createDbStmtStr, ctx);
-        Catalog.getCurrentCatalog().createDb(createDbStmt);
-        System.out.println(Catalog.getCurrentCatalog().getDbNames());
+        Env.getCurrentEnv().createDb(createDbStmt);
+        System.out.println(Env.getCurrentInternalCatalog().getDbNames());
         // 3. create table tbl1
         String createTblStmtStr = "create table db1.tbl1(k1 int) distributed by hash(k1) buckets 3 properties('replication_num' = '1');";
         CreateTableStmt createTableStmt = (CreateTableStmt) UtFrameUtils.parseAndAnalyzeStmt(createTblStmtStr, ctx);
-        Catalog.getCurrentCatalog().createTable(createTableStmt);
+        Env.getCurrentEnv().createTable(createTableStmt);
         // 4. get and test the created db and table
-        Database db = Catalog.getCurrentCatalog().getDbOrMetaException("default_cluster:db1");
-        OlapTable tbl = db.getTableOrMetaException("tbl1", Table.TableType.OLAP);
+        Database db = Env.getCurrentInternalCatalog().getDbOrMetaException("db1");
+        OlapTable tbl = (OlapTable) db.getTableOrMetaException("tbl1", Table.TableType.OLAP);
         tbl.readLock();
         try {
             Assert.assertNotNull(tbl);
@@ -116,7 +121,8 @@ public class AnotherDemoTest {
         }
         // 5. query
         // TODO: we can not process real query for now. So it has to be a explain query
-        String queryStr = "explain select * from db1.tbl1";
+        String queryStr = "explain select /*+ SET_VAR(disable_nereids_rules=PRUNE_EMPTY_PARTITION, "
+                + "enable_parallel_result_sink=true) */ * from db1.tbl1";
         StmtExecutor stmtExecutor = new StmtExecutor(ctx, queryStr);
         stmtExecutor.execute();
         Planner planner = stmtExecutor.planner();
@@ -125,5 +131,16 @@ public class AnotherDemoTest {
         PlanFragment fragment = fragments.get(0);
         Assert.assertTrue(fragment.getPlanRoot() instanceof OlapScanNode);
         Assert.assertEquals(0, fragment.getChildren().size());
+
+        queryStr = "explain select /*+ SET_VAR(disable_nereids_rules=PRUNE_EMPTY_PARTITION, "
+                + "enable_parallel_result_sink=false) */ * from db1.tbl1";
+        stmtExecutor = new StmtExecutor(ctx, queryStr);
+        stmtExecutor.execute();
+        planner = stmtExecutor.planner();
+        fragments = planner.getFragments();
+        Assert.assertEquals(2, fragments.size());
+        fragment = fragments.get(0);
+        Assert.assertTrue(fragment.getPlanRoot() instanceof ExchangeNode);
+        Assert.assertEquals(1, fragment.getChildren().size());
     }
 }

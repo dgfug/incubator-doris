@@ -41,7 +41,7 @@ public abstract class Metric<T> {
         CONNECTIONS,
         PACKETS,
         NOUNIT
-    };
+    }
 
     protected String name;
     protected MetricType type;
@@ -82,6 +82,11 @@ public abstract class Metric<T> {
 
     public List<MetricLabel> getLabels() {
         return labels;
+    }
+
+    public Metric<T> setLabels(List<MetricLabel> newLabels) {
+        this.labels = newLabels;
+        return this;
     }
 
     public abstract T getValue();

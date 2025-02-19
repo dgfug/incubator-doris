@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
@@ -26,7 +26,7 @@ import org.apache.doris.common.UserException;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
-public class UninstallPluginStmt extends DdlStmt {
+public class UninstallPluginStmt extends DdlStmt implements NotFallbackInParser {
 
     private String pluginName;
 
@@ -48,7 +48,7 @@ public class UninstallPluginStmt extends DdlStmt {
         }
 
         // check operation privilege
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAccessManager().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
     }
@@ -66,5 +66,10 @@ public class UninstallPluginStmt extends DdlStmt {
     @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
+    }
+
+    @Override
+    public StmtType stmtType() {
+        return StmtType.UNINSTALL;
     }
 }

@@ -15,47 +15,77 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_TABLET_META_MANAGER_H
-#define DORIS_BE_SRC_OLAP_TABLET_META_MANAGER_H
+#pragma once
 
+#include <gen_cpp/Types_types.h>
+
+#include <functional>
 #include <string>
 
-#include "olap/data_dir.h"
-#include "olap/olap_define.h"
+#include "common/status.h"
+#include "gutil/stringprintf.h"
 #include "olap/tablet_meta.h"
 
 namespace doris {
+class DataDir;
+class OlapMeta;
 
-const std::string OLD_HEADER_PREFIX = "hdr_";
+constexpr std::string_view OLD_HEADER_PREFIX = "hdr_";
 
-const std::string HEADER_PREFIX = "tabletmeta_";
+constexpr std::string_view HEADER_PREFIX = "tabletmeta_";
+
+constexpr std::string_view PENDING_PUBLISH_INFO = "ppi_";
+
+constexpr std::string_view DELETE_BITMAP = "dlb_";
 
 // Helper Class for managing tablet headers of one root path.
 class TabletMetaManager {
 public:
-    static OLAPStatus get_meta(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
-                               TabletMetaSharedPtr tablet_meta);
+    static Status get_meta(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
+                           TabletMetaSharedPtr tablet_meta);
 
-    static OLAPStatus get_json_meta(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
-                                    std::string* json_meta);
+    static Status get_json_meta(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
+                                std::string* json_meta);
 
-    static OLAPStatus save(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
-                           TabletMetaSharedPtr tablet_meta,
-                           const string& header_prefix = "tabletmeta_");
-    static OLAPStatus save(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
-                           const std::string& meta_binary,
-                           const string& header_prefix = "tabletmeta_");
+    static Status save(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
+                       TabletMetaSharedPtr tablet_meta,
+                       std::string_view header_prefix = HEADER_PREFIX);
+    static Status save(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
+                       const std::string& meta_binary,
+                       std::string_view header_prefix = HEADER_PREFIX);
 
-    static OLAPStatus remove(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
-                             const string& header_prefix = "tabletmeta_");
+    static Status remove(DataDir* store, TTabletId tablet_id, TSchemaHash schema_hash,
+                         std::string_view header_prefix = HEADER_PREFIX);
 
-    static OLAPStatus traverse_headers(
-            OlapMeta* meta, std::function<bool(long, long, const std::string&)> const& func,
-            const string& header_prefix = "tabletmeta_");
+    static Status traverse_headers(OlapMeta* meta,
+                                   std::function<bool(long, long, std::string_view)> const& func,
+                                   std::string_view header_prefix = HEADER_PREFIX);
 
-    static OLAPStatus load_json_meta(DataDir* store, const std::string& meta_path);
+    static Status load_json_meta(DataDir* store, const std::string& meta_path);
+
+    static Status save_pending_publish_info(DataDir* store, TTabletId tablet_id,
+                                            int64_t publish_version,
+                                            const std::string& meta_binary);
+
+    static Status remove_pending_publish_info(DataDir* store, TTabletId tablet_id,
+                                              int64_t publish_version);
+
+    static Status traverse_pending_publish(
+            OlapMeta* meta, std::function<bool(int64_t, int64_t, std::string_view)> const& func);
+
+    static Status save_delete_bitmap(DataDir* store, TTabletId tablet_id,
+                                     DeleteBitmapPtr delete_bitmap, int64_t version);
+
+    static Status traverse_delete_bitmap(
+            OlapMeta* meta, std::function<bool(int64_t, int64_t, std::string_view)> const& func);
+
+    static std::string encode_delete_bitmap_key(TTabletId tablet_id, int64_t version);
+    static std::string encode_delete_bitmap_key(TTabletId tablet_id);
+
+    static void decode_delete_bitmap_key(std::string_view enc_key, TTabletId* tablet_id,
+                                         int64_t* version);
+    static Status remove_old_version_delete_bitmap(DataDir* store, TTabletId tablet_id,
+                                                   int64_t version);
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_TABLET_META_MANAGER_H

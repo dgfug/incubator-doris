@@ -20,15 +20,14 @@ package org.apache.doris.common;
 import org.apache.doris.thrift.TNetworkAddress;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.server.ServerContext;
 import org.apache.thrift.server.TServerEventHandler;
-import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
+import org.apache.thrift.transport.layered.TFramedTransport;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -58,13 +57,15 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
         // param input is class org.apache.thrift.protocol.TBinaryProtocol
         TSocket tSocket = null;
         TTransport transport = input.getTransport();
-        switch (thriftServer.getType()) {
+        switch (thriftServer.getType()) { // CHECKSTYLE IGNORE THIS LINE: missing switch default
             case THREADED_SELECTOR:
                 // class org.apache.thrift.transport.TFramedTransport
                 Preconditions.checkState(transport instanceof TFramedTransport);
                 // NOTE: we need patch code in TNonblockingServer, we don't use for now.
                 //  see https://issues.apache.org/jira/browse/THRI FT-1053
-                LOG.debug("TFramedTransport cannot create thrift context. server type: {}", thriftServer.getType());
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("TFramedTransport cannot create thrift context. server type: {}", thriftServer.getType());
+                }
                 return null;
             case SIMPLE:
             case THREAD_POOL:
@@ -72,6 +73,7 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
                 Preconditions.checkState(transport instanceof TSocket);
                 tSocket = (TSocket) transport;
                 break;
+                // CHECKSTYLE IGNORE THIS LINE
         }
         if (tSocket == null) {
             LOG.warn("fail to get client socket. server type: {}", thriftServer.getType());
@@ -92,7 +94,9 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
 
         thriftServer.addConnect(clientAddress);
 
-        LOG.debug("create thrift context. client: {}, server type: {}", clientAddress, thriftServer.getType());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("create thrift context. client: {}, server type: {}", clientAddress, thriftServer.getType());
+        }
         return new ThriftServerContext(clientAddress);
     }
 
@@ -107,7 +111,9 @@ public class ThriftServerEventProcessor implements TServerEventHandler {
         TNetworkAddress clientAddress = thriftServerContext.getClient();
         connectionContext.remove();
         thriftServer.removeConnect(clientAddress);
-        LOG.debug("delete thrift context. client: {}, server type: {}", clientAddress, thriftServer.getType());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("delete thrift context. client: {}, server type: {}", clientAddress, thriftServer.getType());
+        }
     }
 
     @Override

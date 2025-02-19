@@ -26,19 +26,27 @@ import com.google.common.collect.BoundType;
 import com.google.common.collect.Range;
 import com.google.common.collect.RangeMap;
 import com.google.common.collect.TreeRangeMap;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonDeserializationContext;
+import com.google.gson.JsonDeserializer;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSerializationContext;
+import com.google.gson.JsonSerializer;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
 public class RangeUtils {
-    
+
     public static final Comparator<Map.Entry<Long, PartitionItem>> RANGE_MAP_ENTRY_COMPARATOR =
-            Comparator.comparing(o -> (((RangePartitionItem)o.getValue()).getItems()).lowerEndpoint());
+            Comparator.comparing(o -> (((RangePartitionItem) o.getValue()).getItems()).lowerEndpoint());
 
     public static final Comparator<PartitionItem> RANGE_COMPARATOR =
             Comparator.comparing(o -> ((RangePartitionItem) o).getItems().lowerEndpoint());
@@ -57,22 +65,23 @@ public class RangeUtils {
         }
         return false;
     }
-    /*
+
+    /**
      * Pass only if the 2 range lists are exactly same
      * What is "exactly same"?
      *      1. {[0, 10), [10, 20)} exactly same as {[0, 20)}
      *      2. {[0, 10), [15, 20)} exactly same as {[0, 10), [15, 18), [18, 20)}
      *      3. {[0, 10), [15, 20)} exactly same as {[0, 10), [15, 20)}
      *      4. {[0, 10), [15, 20)} NOT exactly same as {[0, 20)}
-     *      
+     *
      *  Here I will use an example to explain the algorithm:
      *      list1: {[0, 10), [15, 20)}
      *      list2: {[0, 10), [15, 18), [18, 20)}
-     *  
+     *
      *  1. sort 2 lists first (the above 2 lists are already sorted)
      *  2. Begin to compare ranges from index 0: [0, 10) and [0, 10)
      *      2.1 lower bounds (0 and 0) are equal.
-     *      2.2 upper bounds (10 and 10) are equal. 
+     *      2.2 upper bounds (10 and 10) are equal.
      *  3. Begin to compare next 2 ranges [15, 20) and [15, 18)
      *      3.1 lower bounds (15 and 15) are equal.
      *      3.2 upper bounds (20 and 18) are not equal. and 20 > 18
@@ -82,7 +91,8 @@ public class RangeUtils {
      *      4.2 upper bounds (20 and 20) are equal.
      *  5. Not more next ranges, so 2 lists are equal.
      */
-    public static void checkPartitionItemListsMatch(List<PartitionItem> list1, List<PartitionItem> list2) throws DdlException {
+    public static void checkPartitionItemListsMatch(List<PartitionItem> list1, List<PartitionItem> list2)
+            throws DdlException {
         Collections.sort(list1, RangeUtils.RANGE_COMPARATOR);
         Collections.sort(list2, RangeUtils.RANGE_COMPARATOR);
 
@@ -95,7 +105,7 @@ public class RangeUtils {
                 throw new DdlException("2 range lists are not stricly matched. "
                         + range1.lowerEndpoint() + " vs. " + range2.lowerEndpoint());
             }
-            
+
             int res = range1.upperEndpoint().compareTo(range2.upperEndpoint());
             if (res == 0) {
                 ++idx1;
@@ -124,29 +134,6 @@ public class RangeUtils {
         if (idx1 < list1.size() || idx2 < list2.size()) {
             throw new DdlException("2 range lists are not stricly matched. "
                     + list1 + " vs. " + list2);
-        }
-    }
-
-    public static void writeRange(DataOutput out, Range<PartitionKey> range) throws IOException {
-        boolean hasLowerBound = false;
-        boolean hasUpperBound = false;
-
-        // write lower bound if lower bound exists
-        hasLowerBound = range.hasLowerBound();
-        out.writeBoolean(hasLowerBound);
-        if (hasLowerBound) {
-            PartitionKey lowerBound = range.lowerEndpoint();
-            out.writeBoolean(range.lowerBoundType() == BoundType.CLOSED);
-            lowerBound.write(out);
-        }
-
-        // write upper bound if upper bound exists
-        hasUpperBound = range.hasUpperBound();
-        out.writeBoolean(hasUpperBound);
-        if (hasUpperBound) {
-            PartitionKey upperBound = range.upperEndpoint();
-            out.writeBoolean(range.upperBoundType() == BoundType.CLOSED);
-            upperBound.write(out);
         }
     }
 
@@ -213,6 +200,70 @@ public class RangeUtils {
             if (!baseRangeMap.subRangeMap(item.getItems()).asMapOfRanges().isEmpty()) {
                 throw new DdlException("Range: " + item.getItems() + " conflicts with existing range");
             }
+        }
+    }
+
+    public static class RangeSerializer implements
+                JsonSerializer<Range<PartitionKey>>, JsonDeserializer<Range<PartitionKey>> {
+        @Override
+        public JsonElement serialize(Range<PartitionKey> range, Type type, JsonSerializationContext context) {
+            JsonArray result = new JsonArray();
+
+            // write lower bound if lower bound exists
+            if (range.hasLowerBound()) {
+                PartitionKey lowerBound = range.lowerEndpoint();
+                JsonObject lowerBoundObject = new JsonObject();
+                lowerBoundObject.addProperty("type", range.lowerBoundType().toString());
+                lowerBoundObject.add("value", context.serialize(lowerBound));
+                result.add(lowerBoundObject);
+            } else {
+                result.add(JsonNull.INSTANCE);
+            }
+
+            // write upper bound if upper bound exists
+            if (range.hasUpperBound()) {
+                PartitionKey upperBound = range.upperEndpoint();
+                JsonObject upperBoundObject = new JsonObject();
+                upperBoundObject.addProperty("type", range.upperBoundType().toString());
+                upperBoundObject.add("value", context.serialize(upperBound));
+                result.add(upperBoundObject);
+            } else {
+                result.add(JsonNull.INSTANCE);
+            }
+
+            return result;
+        }
+
+        @Override
+        public Range<PartitionKey> deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) {
+            JsonArray jsonArray = json.getAsJsonArray();
+            PartitionKey lowerBound = null;
+            BoundType lowerBoundType = BoundType.CLOSED;
+            PartitionKey upperBound = null;
+            BoundType upperBoundType = BoundType.CLOSED;
+
+            if (!jsonArray.get(0).isJsonNull()) {
+                JsonObject lowerBoundObject = jsonArray.get(0).getAsJsonObject();
+                lowerBoundType = BoundType.valueOf(lowerBoundObject.get("type").getAsString());
+                lowerBound = context.deserialize(lowerBoundObject.get("value"), PartitionKey.class);
+            }
+
+            if (!jsonArray.get(1).isJsonNull()) {
+                JsonObject upperBoundObject = jsonArray.get(1).getAsJsonObject();
+                upperBoundType = BoundType.valueOf(upperBoundObject.get("type").getAsString());
+                upperBound = context.deserialize(upperBoundObject.get("value"), PartitionKey.class);
+            }
+
+            if (lowerBound == null && upperBound == null) {
+                return null;
+            }
+            if (lowerBound == null) {
+                return Range.upTo(upperBound, upperBoundType);
+            }
+            if (upperBound == null) {
+                return Range.downTo(lowerBound, lowerBoundType);
+            }
+            return Range.range(lowerBound, lowerBoundType, upperBound, upperBoundType);
         }
     }
 }
